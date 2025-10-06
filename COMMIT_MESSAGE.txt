@@ -1,0 +1,14 @@
+chore: initial monorepo scaffold
+
+Set up `careerpilot-agent` monorepo with:
+- frontend/ (Next.js + TypeScript + Tailwind) scaffold files
+- backend/ (FastAPI) scaffold files
+- root README with branching model and next steps
+- root .gitignore for Node and Python
+
+Branching instructions:
+- Default branch: main
+- Create integration branch: dev
+- Create feature branches from dev, e.g., feat/resume-upload
+
+
