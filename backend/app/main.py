@@ -686,17 +686,128 @@ async def match_jobs(request: JobMatchRequest):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-# Pydantic model for resume edit proposal request
+# Pydantic models for resume edit proposal request
+class SuggestionItem(BaseModel):
+    text: str
+    confidence: str  # "low", "med", "high"
+
 class ResumeEditRequest(BaseModel):
     job_id: str
     resume_text: str
-    user_skills: List[str]
-
 
 class ResumeEditResponse(BaseModel):
-    suggestions: List[str]
-    job_title: str
-    company: str
+    suggestions: List[SuggestionItem]
+
+
+def get_ai_resume_suggestions(resume_text: str, job_description: str, job_requirements: List[str], job_title: str, company: str) -> List[SuggestionItem]:
+    """
+    Generate AI-powered resume suggestions using OpenAI GPT.
+    
+    IMPORTANT: User must approve any edits before applying them to their resume.
+    This function only provides suggestions - it does not modify the user's resume.
+    """
+    if not openai_client:
+        raise HTTPException(status_code=500, detail="OpenAI client not available for AI suggestions")
+    
+    try:
+        # Prepare the prompt for OpenAI
+        requirements_text = "\n".join(f"- {req}" for req in job_requirements) if job_requirements else "Not specified"
+        
+        prompt = f"""
+You are a professional resume consultant helping a candidate improve their resume for a specific job application.
+
+JOB INFORMATION:
+- Position: {job_title} at {company}
+- Description: {job_description}
+- Requirements: 
+{requirements_text}
+
+CANDIDATE'S CURRENT RESUME:
+{resume_text}
+
+INSTRUCTIONS:
+Generate up to 6 concise, actionable resume improvement suggestions. Each suggestion should:
+1. Be framed as "Add or emphasize: [specific recommendation]"
+2. Be truthful and based on what's actually in the resume
+3. NOT invent or suggest fake experience the candidate doesn't have
+4. Be 1-2 sentences maximum
+5. Focus on improving match with the job requirements
+6. Be specific and actionable
+
+EXAMPLES OF GOOD SUGGESTIONS:
+- "Add or emphasize: Quantify your achievements with specific metrics (e.g., 'increased performance by 25%')"
+- "Add or emphasize: Highlight your Python experience in the skills section if you have it"
+- "Add or emphasize: Include any leadership or team management experience you have"
+
+EXAMPLES OF BAD SUGGESTIONS (DON'T DO THIS):
+- "Add or emphasize: 5 years of Kubernetes experience" (if not in resume)
+- "Add or emphasize: AWS certification" (if not mentioned)
+
+Return your suggestions as a JSON array of objects with this exact format:
+[
+  {{"text": "Add or emphasize: [your suggestion]", "confidence": "high"}},
+  {{"text": "Add or emphasize: [your suggestion]", "confidence": "med"}},
+  {{"text": "Add or emphasize: [your suggestion]", "confidence": "low"}}
+]
+
+Use confidence levels:
+- "high": Very clear improvement that directly matches job requirements
+- "med": Good improvement that would help with job match
+- "low": Minor improvement or general resume advice
+
+IMPORTANT: Only suggest things that are truthful and can be verified from the resume content.
+"""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a professional resume consultant. Always be truthful and never suggest fake experience."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=800,
+            temperature=0.3  # Lower temperature for more consistent, factual responses
+        )
+        
+        # Parse the AI response
+        ai_response = response.choices[0].message.content.strip()
+        
+        # Try to parse as JSON
+        try:
+            # Extract JSON from response (in case there's extra text)
+            start_idx = ai_response.find('[')
+            end_idx = ai_response.rfind(']') + 1
+            if start_idx != -1 and end_idx > start_idx:
+                json_str = ai_response[start_idx:end_idx]
+                suggestions_data = json.loads(json_str)
+                
+                # Convert to SuggestionItem objects
+                suggestions = []
+                for item in suggestions_data:
+                    if isinstance(item, dict) and 'text' in item and 'confidence' in item:
+                        confidence = item['confidence'].lower()
+                        if confidence not in ['low', 'med', 'high']:
+                            confidence = 'med'  # Default to medium if invalid
+                        
+                        suggestions.append(SuggestionItem(
+                            text=item['text'],
+                            confidence=confidence
+                        ))
+                
+                return suggestions[:6]  # Limit to 6 suggestions
+            else:
+                raise ValueError("No JSON array found in response")
+                
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Failed to parse AI response as JSON: {e}")
+            # Fallback: return a generic suggestion
+            return [SuggestionItem(
+                text="Add or emphasize: Review the job requirements and ensure your relevant experience is prominently featured",
+                confidence="med"
+            )]
+            
+    except Exception as e:
+        logger.error(f"Failed to get AI resume suggestions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate AI suggestions")
 
 
 @app.post("/propose-resume", response_model=ResumeEditResponse)
@@ -704,16 +815,25 @@ async def propose_resume_edits(request: ResumeEditRequest):
     """
     Propose resume edits to better match a specific job.
     
-    This endpoint analyzes the user's resume against a specific job and provides
-    suggestions for improvement. In a production system, this would use AI/LLM
-    to generate personalized recommendations.
+    IMPORTANT: These are only suggestions. Users must approve any edits before 
+    applying them to their resume. This endpoint does not modify the user's resume.
     
-    For now, it provides basic heuristic-based suggestions.
+    Behavior:
+    - If OPENAI_API_KEY is set: Uses AI to generate up to 6 personalized suggestions
+    - If no OpenAI key: Falls back to heuristic analysis of missing skills
+    - All suggestions are framed as "Add or emphasize: [recommendation]"
+    - AI suggestions are truthful and don't invent experience
     """
     try:
         # Get job details from Supabase
         if not supabase_client:
             raise HTTPException(status_code=500, detail="Supabase client not available")
+        
+        # Validate job_id format (should be a UUID)
+        try:
+            uuid.UUID(request.job_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid job_id format. Must be a valid UUID.")
         
         # Fetch job details
         response = supabase_client.table('jobs').select('*').eq('id', request.job_id).execute()
@@ -730,64 +850,383 @@ async def propose_resume_edits(request: ResumeEditRequest):
         job_description = job_data.get('description', '')
         job_requirements = job_data.get('requirements', [])
         
-        # Generate suggestions based on missing skills and job requirements
         suggestions = []
         
-        # Analyze missing skills
-        job_skills = set()
-        job_skills.update(extract_skills_from_text(job_description))
-        for req in job_requirements:
-            job_skills.update(extract_skills_from_text(req))
+        # Try AI-powered suggestions first (if OpenAI is available)
+        if openai_client:
+            try:
+                logger.info(f"Using AI to generate resume suggestions for job {request.job_id}")
+                ai_suggestions = get_ai_resume_suggestions(
+                    request.resume_text, 
+                    job_description, 
+                    job_requirements, 
+                    job_title, 
+                    company
+                )
+                suggestions = ai_suggestions
+                logger.info(f"Generated {len(suggestions)} AI-powered suggestions")
+                
+            except Exception as e:
+                logger.warning(f"AI suggestion generation failed, falling back to heuristics: {e}")
+                # Fall through to heuristic suggestions
         
-        # Find skills that are in the job but not in user's resume
-        user_skills_set = set(skill.lower() for skill in request.user_skills)
-        missing_skills = []
-        
-        for job_skill in job_skills:
-            if job_skill.lower() not in user_skills_set:
-                missing_skills.append(job_skill)
-        
-        # Generate suggestions
-        if missing_skills:
-            suggestions.append(f"Consider adding these skills to your resume: {', '.join(missing_skills[:5])}")
-        
-        # Check for common resume improvements
-        if not any(keyword in request.resume_text.lower() for keyword in ['experience', 'worked', 'developed', 'created']):
-            suggestions.append("Add more action verbs and specific achievements to your experience section")
-        
-        if len(request.resume_text.split()) < 200:
-            suggestions.append("Consider expanding your resume with more detailed descriptions of your projects and achievements")
-        
-        if not any(keyword in request.resume_text.lower() for keyword in ['project', 'portfolio', 'github']):
-            suggestions.append("Include links to your projects, portfolio, or GitHub profile to showcase your work")
-        
-        # Add job-specific suggestions
-        if 'python' in job_description.lower() and 'python' not in request.resume_text.lower():
-            suggestions.append("Highlight your Python experience more prominently if you have it")
-        
-        if 'aws' in job_description.lower() and 'aws' not in request.resume_text.lower():
-            suggestions.append("Consider adding any cloud computing or AWS experience you may have")
-        
-        if 'leadership' in job_description.lower() or 'team' in job_description.lower():
-            suggestions.append("Emphasize any leadership or teamwork experience you have")
-        
-        # Default suggestion if no specific ones were generated
+        # Fallback: Heuristic-based suggestions (if no AI or AI failed)
         if not suggestions:
-            suggestions.append("Your resume looks good! Consider tailoring it further by using keywords from the job description")
+            logger.info(f"Using heuristic analysis for resume suggestions for job {request.job_id}")
+            
+            # Parse user's resume to extract skills
+            parsed_resume = simple_parse_resume(request.resume_text)
+            user_skills = parsed_resume.get("skills", [])
+            
+            # Extract job skills
+            job_skills = set()
+            job_skills.update(extract_skills_from_text(job_description))
+            for req in job_requirements:
+                job_skills.update(extract_skills_from_text(req))
+            
+            # Find missing skills
+            user_skills_set = set(skill.lower() for skill in user_skills)
+            missing_skills = []
+            
+            for job_skill in job_skills:
+                if job_skill.lower() not in user_skills_set:
+                    missing_skills.append(job_skill)
+            
+            # Generate top 3 missing skill suggestions
+            for skill in missing_skills[:3]:
+                suggestions.append(SuggestionItem(
+                    text=f"Add '{skill}' to Skills section",
+                    confidence="high"
+                ))
+            
+            # Add general improvement suggestions
+            if len(request.resume_text.split()) < 200:
+                suggestions.append(SuggestionItem(
+                    text="Add or emphasize: More detailed descriptions of your projects and achievements",
+                    confidence="med"
+                ))
+            
+            if not any(keyword in request.resume_text.lower() for keyword in ['project', 'portfolio', 'github']):
+                suggestions.append(SuggestionItem(
+                    text="Add or emphasize: Links to your projects, portfolio, or GitHub profile",
+                    confidence="med"
+                ))
+        
+        # Ensure we have at least one suggestion
+        if not suggestions:
+            suggestions.append(SuggestionItem(
+                text="Add or emphasize: Keywords from the job description that match your experience",
+                confidence="low"
+            ))
+        
+        # Limit to 6 suggestions maximum
+        suggestions = suggestions[:6]
         
         logger.info(f"Generated {len(suggestions)} resume suggestions for job {request.job_id}")
         
-        return ResumeEditResponse(
-            suggestions=suggestions,
-            job_title=job_title,
-            company=company
-        )
+        return ResumeEditResponse(suggestions=suggestions)
         
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Error in resume edit proposal: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# Pydantic models for resume draft saving
+class AppliedSuggestion(BaseModel):
+    text: str
+    confidence: str
+    applied_text: str
+
+class JobContext(BaseModel):
+    job_title: str
+    company: str
+
+class SaveResumeDraftRequest(BaseModel):
+    user_id: str
+    resume_text: str
+    applied_suggestions: List[AppliedSuggestion]
+    job_context: JobContext
+
+class SaveResumeDraftResponse(BaseModel):
+    draft_id: str
+    message: str
+    applied_count: int
+
+
+@app.post("/save-resume-draft", response_model=SaveResumeDraftResponse)
+async def save_resume_draft(request: SaveResumeDraftRequest):
+    """
+    Save a resume draft with applied suggestions.
+    
+    This endpoint saves a modified resume version with the user's selected
+    suggestions applied. The draft is stored for future reference and can
+    be used to create multiple versions for different job applications.
+    
+    IMPORTANT: This creates a new version, it doesn't modify the original resume.
+    """
+    try:
+        # Generate a unique draft ID
+        draft_id = str(uuid.uuid4())
+        
+        # Prepare draft data for storage
+        draft_data = {
+            "draft_id": draft_id,
+            "user_id": request.user_id,
+            "resume_text": request.resume_text,
+            "applied_suggestions": [
+                {
+                    "text": suggestion.text,
+                    "confidence": suggestion.confidence,
+                    "applied_text": suggestion.applied_text
+                }
+                for suggestion in request.applied_suggestions
+            ],
+            "job_context": {
+                "job_title": request.job_context.job_title,
+                "company": request.job_context.company
+            },
+            "created_at": "now()",  # Will be set by database
+            "word_count": len(request.resume_text.split()),
+            "suggestions_count": len(request.applied_suggestions)
+        }
+        
+        # Save to Supabase using the drafts column in users table
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Supabase client not available")
+        
+        logger.info(f"Saving resume draft {draft_id} for user {request.user_id}")
+        logger.info(f"Draft contains {len(request.applied_suggestions)} applied suggestions")
+        logger.info(f"Target job: {request.job_context.job_title} at {request.job_context.company}")
+        
+        try:
+            # Validate user_id format first
+            try:
+                uuid.UUID(request.user_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid user_id format. Must be a valid UUID.")
+            
+            # First, check if user exists, if not create them
+            user_response = supabase_client.table('users').select('id').eq('id', request.user_id).execute()
+            
+            if not user_response.data:
+                # Create user if they don't exist
+                logger.info(f"Creating new user {request.user_id}")
+                new_user = {
+                    'id': request.user_id,
+                    'email': f'user-{request.user_id}@careerpilot.local',  # Placeholder email
+                    'profile': {'name': 'CareerPilot User', 'source': 'draft_system'},
+                    'drafts': []
+                }
+                supabase_client.table('users').insert(new_user).execute()
+            
+            # Call the add_user_draft function
+            # Note: We need to use RPC call since we're using a custom function
+            rpc_response = supabase_client.rpc(
+                'add_user_draft',
+                {
+                    'p_user_id': request.user_id,
+                    'p_draft_id': draft_id,
+                    'p_resume_text': request.resume_text,
+                    'p_applied_suggestions': [
+                        {
+                            'text': suggestion.text,
+                            'confidence': suggestion.confidence,
+                            'applied_text': suggestion.applied_text
+                        }
+                        for suggestion in request.applied_suggestions
+                    ],
+                    'p_job_context': {
+                        'job_title': request.job_context.job_title,
+                        'company': request.job_context.company
+                    }
+                }
+            ).execute()
+            
+            logger.info(f"Successfully saved resume draft {draft_id} to Supabase")
+            
+        except Exception as db_error:
+            logger.error(f"Failed to save draft to database: {db_error}")
+            raise HTTPException(status_code=500, detail=f"Failed to save draft to database: {str(db_error)}")
+        
+        return SaveResumeDraftResponse(
+            draft_id=draft_id,
+            message="Resume draft saved successfully",
+            applied_count=len(request.applied_suggestions)
+        )
+        
+    except Exception as e:
+        logger.exception("Error saving resume draft: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to save resume draft: {str(e)}")
+
+
+# Pydantic models for draft retrieval
+class GetUserDraftsResponse(BaseModel):
+    user_id: str
+    drafts: List[dict]
+    total_count: int
+
+class GetDraftResponse(BaseModel):
+    draft_id: str
+    resume_text: str
+    applied_suggestions: List[AppliedSuggestion]
+    job_context: JobContext
+    created_at: str
+    word_count: int
+    suggestions_count: int
+
+
+@app.get("/user/{user_id}/drafts", response_model=GetUserDraftsResponse)
+async def get_user_drafts(user_id: str):
+    """
+    Get all resume drafts for a specific user.
+    
+    Returns all saved resume drafts with metadata for the user.
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Supabase client not available")
+        
+        # Validate UUID format
+        try:
+            uuid.UUID(user_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid user_id format. Must be a valid UUID.")
+        
+        # Get user's drafts using the custom function
+        rpc_response = supabase_client.rpc('get_user_drafts', {'p_user_id': user_id}).execute()
+        
+        if not rpc_response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        drafts_data = rpc_response.data[0] if rpc_response.data else []
+        
+        # Convert to list if it's not already
+        if isinstance(drafts_data, str):
+            import json
+            drafts_data = json.loads(drafts_data)
+        elif not isinstance(drafts_data, list):
+            drafts_data = []
+        
+        logger.info(f"Retrieved {len(drafts_data)} drafts for user {user_id}")
+        
+        return GetUserDraftsResponse(
+            user_id=user_id,
+            drafts=drafts_data,
+            total_count=len(drafts_data)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error retrieving user drafts: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve drafts: {str(e)}")
+
+
+@app.get("/user/{user_id}/draft/{draft_id}", response_model=GetDraftResponse)
+async def get_user_draft(user_id: str, draft_id: str):
+    """
+    Get a specific resume draft by draft_id.
+    
+    Returns the full draft data including resume text and applied suggestions.
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Supabase client not available")
+        
+        # Validate UUID formats
+        try:
+            uuid.UUID(user_id)
+            uuid.UUID(draft_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid user_id or draft_id format. Must be valid UUIDs.")
+        
+        # Get specific draft using the custom function
+        rpc_response = supabase_client.rpc(
+            'get_user_draft',
+            {'p_user_id': user_id, 'p_draft_id': draft_id}
+        ).execute()
+        
+        if not rpc_response.data or not rpc_response.data[0]:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        
+        draft_data = rpc_response.data[0]
+        
+        # Convert applied_suggestions to AppliedSuggestion objects
+        applied_suggestions = []
+        for suggestion in draft_data.get('applied_suggestions', []):
+            applied_suggestions.append(AppliedSuggestion(
+                text=suggestion.get('text', ''),
+                confidence=suggestion.get('confidence', 'low'),
+                applied_text=suggestion.get('applied_text', '')
+            ))
+        
+        # Create job context
+        job_context = JobContext(
+            job_title=draft_data.get('job_context', {}).get('job_title', ''),
+            company=draft_data.get('job_context', {}).get('company', '')
+        )
+        
+        logger.info(f"Retrieved draft {draft_id} for user {user_id}")
+        
+        return GetDraftResponse(
+            draft_id=draft_id,
+            resume_text=draft_data.get('resume_text', ''),
+            applied_suggestions=applied_suggestions,
+            job_context=job_context,
+            created_at=draft_data.get('created_at', ''),
+            word_count=draft_data.get('word_count', 0),
+            suggestions_count=draft_data.get('suggestions_count', 0)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error retrieving draft: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve draft: {str(e)}")
+
+
+@app.delete("/user/{user_id}/draft/{draft_id}")
+async def delete_user_draft(user_id: str, draft_id: str):
+    """
+    Delete a specific resume draft.
+    
+    Removes the draft from the user's drafts array.
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Supabase client not available")
+        
+        # Validate UUID formats
+        try:
+            uuid.UUID(user_id)
+            uuid.UUID(draft_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid user_id or draft_id format. Must be valid UUIDs.")
+        
+        # Delete the draft using the custom function
+        rpc_response = supabase_client.rpc(
+            'delete_user_draft',
+            {'p_user_id': user_id, 'p_draft_id': draft_id}
+        ).execute()
+        
+        if not rpc_response.data or not rpc_response.data[0]:
+            raise HTTPException(status_code=404, detail="Draft not found or could not be deleted")
+        
+        deleted = rpc_response.data[0]
+        
+        if deleted:
+            logger.info(f"Successfully deleted draft {draft_id} for user {user_id}")
+            return {"message": "Draft deleted successfully", "draft_id": draft_id}
+        else:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting draft: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete draft: {str(e)}")
 
 
 @app.get("/")
