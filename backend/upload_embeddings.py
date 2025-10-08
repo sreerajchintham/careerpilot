@@ -54,7 +54,14 @@ def upload_embeddings_to_supabase():
                     existing_job = response.data[0]
                     job_id = existing_job['id']
                     
-                    # Update only the raw field with embedding, keep other fields unchanged
+                    # Update the raw field with embedding AND preserve all original job data
+                    # Merge the existing raw data with the new embedding
+                    existing_raw = existing_job.get('raw', {})
+                    new_raw = job.get('raw', {})
+                    
+                    # Preserve all original data and add embedding
+                    merged_raw = {**existing_raw, **new_raw}
+                    
                     updates.append({
                         'id': job_id,
                         'source': existing_job['source'],
@@ -62,7 +69,7 @@ def upload_embeddings_to_supabase():
                         'company': existing_job['company'],
                         'location': existing_job['location'],
                         'posted_at': existing_job['posted_at'],
-                        'raw': job.get('raw', {})
+                        'raw': merged_raw
                     })
             
             if updates:
