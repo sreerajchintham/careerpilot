@@ -1,0 +1,241 @@
+[
+  {
+    "source": "linkedin",
+    "title": "Senior Software Engineer - Full Stack",
+    "company": "TechCorp Inc.",
+    "location": "San Francisco, CA (Remote)",
+    "posted_at": "2025-01-05T10:00:00Z",
+    "description": "We're looking for a Senior Software Engineer to join our growing team. You'll work on building scalable web applications using modern technologies.\n\nRequirements:\n- 5+ years of software development experience\n- Strong proficiency in Python, JavaScript, and React\n- Experience with PostgreSQL and MongoDB\n- Knowledge of AWS services\n- Experience with Docker and Kubernetes\n- Strong problem-solving skills\n- Excellent communication skills\n\nNice to have:\n- Experience with machine learning\n- Knowledge of GraphQL\n- Previous startup experience",
+    "requirements": [
+      "5+ years of software development experience",
+      "Strong proficiency in Python, JavaScript, and React",
+      "Experience with PostgreSQL and MongoDB",
+      "Knowledge of AWS services",
+      "Experience with Docker and Kubernetes",
+      "Strong problem-solving skills",
+      "Excellent communication skills"
+    ],
+    "nice_to_have": [
+      "Experience with machine learning",
+      "Knowledge of GraphQL",
+      "Previous startup experience"
+    ],
+    "salary_range": "$120,000 - $180,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "indeed",
+    "title": "Frontend Developer - React Specialist",
+    "company": "StartupXYZ",
+    "location": "New York, NY",
+    "posted_at": "2025-01-04T14:30:00Z",
+    "description": "Join our dynamic team as a Frontend Developer! We're building the next generation of web applications.\n\nWhat you'll do:\n- Develop responsive web applications using React and TypeScript\n- Collaborate with designers and backend developers\n- Optimize applications for maximum speed and scalability\n- Write clean, maintainable code\n\nRequirements:\n- 3+ years of frontend development experience\n- Expert knowledge of React, TypeScript, and modern JavaScript\n- Experience with CSS frameworks (Tailwind, Bootstrap)\n- Knowledge of state management (Redux, Zustand)\n- Experience with testing frameworks (Jest, React Testing Library)\n- Understanding of REST APIs and GraphQL",
+    "requirements": [
+      "3+ years of frontend development experience",
+      "Expert knowledge of React, TypeScript, and modern JavaScript",
+      "Experience with CSS frameworks (Tailwind, Bootstrap)",
+      "Knowledge of state management (Redux, Zustand)",
+      "Experience with testing frameworks (Jest, React Testing Library)",
+      "Understanding of REST APIs and GraphQL"
+    ],
+    "nice_to_have": [
+      "Experience with Next.js",
+      "Knowledge of Webpack and Vite",
+      "Previous experience with design systems"
+    ],
+    "salary_range": "$90,000 - $130,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "company_website",
+    "title": "Backend Engineer - Python/Django",
+    "company": "DataFlow Solutions",
+    "location": "Austin, TX (Hybrid)",
+    "posted_at": "2025-01-03T09:15:00Z",
+    "description": "We're seeking a Backend Engineer to help us build robust data processing systems.\n\nResponsibilities:\n- Design and implement scalable backend services\n- Work with Django, PostgreSQL, and Redis\n- Build and maintain APIs\n- Optimize database queries and performance\n- Collaborate with data science team\n\nRequirements:\n- 4+ years of Python development experience\n- Strong experience with Django framework\n- Proficiency with PostgreSQL and database design\n- Experience with Redis and caching strategies\n- Knowledge of RESTful API design\n- Experience with Git and CI/CD pipelines\n- Strong understanding of software architecture patterns",
+    "requirements": [
+      "4+ years of Python development experience",
+      "Strong experience with Django framework",
+      "Proficiency with PostgreSQL and database design",
+      "Experience with Redis and caching strategies",
+      "Knowledge of RESTful API design",
+      "Experience with Git and CI/CD pipelines",
+      "Strong understanding of software architecture patterns"
+    ],
+    "nice_to_have": [
+      "Experience with Celery and background tasks",
+      "Knowledge of data processing frameworks",
+      "Experience with cloud platforms (AWS, GCP)"
+    ],
+    "salary_range": "$100,000 - $150,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "linkedin",
+    "title": "DevOps Engineer - Cloud Infrastructure",
+    "company": "CloudScale Technologies",
+    "location": "Seattle, WA",
+    "posted_at": "2025-01-02T16:45:00Z",
+    "description": "Join our infrastructure team to help scale our cloud operations!\n\nWhat you'll do:\n- Manage and scale cloud infrastructure on AWS\n- Implement CI/CD pipelines using Jenkins and GitHub Actions\n- Containerize applications using Docker and Kubernetes\n- Monitor system performance and reliability\n- Automate deployment and scaling processes\n\nRequirements:\n- 3+ years of DevOps or infrastructure experience\n- Strong experience with AWS services (EC2, S3, RDS, Lambda)\n- Proficiency with Docker and Kubernetes\n- Experience with infrastructure as code (Terraform, CloudFormation)\n- Knowledge of monitoring tools (Prometheus, Grafana)\n- Experience with Linux system administration\n- Strong scripting skills (Bash, Python)",
+    "requirements": [
+      "3+ years of DevOps or infrastructure experience",
+      "Strong experience with AWS services (EC2, S3, RDS, Lambda)",
+      "Proficiency with Docker and Kubernetes",
+      "Experience with infrastructure as code (Terraform, CloudFormation)",
+      "Knowledge of monitoring tools (Prometheus, Grafana)",
+      "Experience with Linux system administration",
+      "Strong scripting skills (Bash, Python)"
+    ],
+    "nice_to_have": [
+      "Experience with multi-cloud environments",
+      "Knowledge of security best practices",
+      "Experience with microservices architecture"
+    ],
+    "salary_range": "$110,000 - $160,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "indeed",
+    "title": "Data Scientist - Machine Learning",
+    "company": "AI Innovations Lab",
+    "location": "Boston, MA (Remote)",
+    "posted_at": "2025-01-01T11:20:00Z",
+    "description": "We're looking for a Data Scientist to join our AI research team!\n\nResponsibilities:\n- Develop machine learning models for various business problems\n- Analyze large datasets to extract insights\n- Collaborate with engineering teams to deploy models\n- Present findings to stakeholders\n- Stay current with latest ML research and techniques\n\nRequirements:\n- Master's degree in Data Science, Statistics, or related field\n- 3+ years of experience in machine learning\n- Proficiency in Python and R\n- Experience with ML libraries (scikit-learn, TensorFlow, PyTorch)\n- Strong statistical analysis skills\n- Experience with SQL and data manipulation\n- Knowledge of cloud platforms (AWS, GCP)",
+    "requirements": [
+      "Master's degree in Data Science, Statistics, or related field",
+      "3+ years of experience in machine learning",
+      "Proficiency in Python and R",
+      "Experience with ML libraries (scikit-learn, TensorFlow, PyTorch)",
+      "Strong statistical analysis skills",
+      "Experience with SQL and data manipulation",
+      "Knowledge of cloud platforms (AWS, GCP)"
+    ],
+    "nice_to_have": [
+      "Experience with deep learning",
+      "Knowledge of MLOps practices",
+      "Previous experience in fintech or healthcare"
+    ],
+    "salary_range": "$95,000 - $140,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "company_website",
+    "title": "Full Stack Developer - Node.js/React",
+    "company": "WebCraft Studios",
+    "location": "Denver, CO",
+    "posted_at": "2024-12-31T13:10:00Z",
+    "description": "Join our creative team as a Full Stack Developer!\n\nWhat you'll work on:\n- Build full-stack web applications\n- Develop RESTful APIs using Node.js and Express\n- Create responsive frontend interfaces with React\n- Work with MongoDB and PostgreSQL databases\n- Implement user authentication and authorization\n- Deploy applications to cloud platforms\n\nRequirements:\n- 3+ years of full-stack development experience\n- Strong proficiency in JavaScript, Node.js, and React\n- Experience with Express.js framework\n- Knowledge of MongoDB and PostgreSQL\n- Experience with RESTful API development\n- Understanding of authentication systems (JWT, OAuth)\n- Experience with version control (Git)",
+    "requirements": [
+      "3+ years of full-stack development experience",
+      "Strong proficiency in JavaScript, Node.js, and React",
+      "Experience with Express.js framework",
+      "Knowledge of MongoDB and PostgreSQL",
+      "Experience with RESTful API development",
+      "Understanding of authentication systems (JWT, OAuth)",
+      "Experience with version control (Git)"
+    ],
+    "nice_to_have": [
+      "Experience with TypeScript",
+      "Knowledge of GraphQL",
+      "Previous experience with e-commerce platforms"
+    ],
+    "salary_range": "$85,000 - $125,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "linkedin",
+    "title": "Mobile App Developer - React Native",
+    "company": "AppVenture Mobile",
+    "location": "Miami, FL (Hybrid)",
+    "posted_at": "2024-12-30T08:30:00Z",
+    "description": "We're seeking a Mobile App Developer to join our growing mobile team!\n\nResponsibilities:\n- Develop cross-platform mobile applications using React Native\n- Collaborate with designers and backend developers\n- Implement native features and third-party integrations\n- Optimize app performance and user experience\n- Maintain and update existing mobile applications\n\nRequirements:\n- 2+ years of mobile development experience\n- Strong experience with React Native\n- Knowledge of JavaScript and TypeScript\n- Experience with mobile app deployment (iOS/Android)\n- Understanding of mobile UI/UX principles\n- Experience with REST APIs and state management\n- Knowledge of mobile testing frameworks",
+    "requirements": [
+      "2+ years of mobile development experience",
+      "Strong experience with React Native",
+      "Knowledge of JavaScript and TypeScript",
+      "Experience with mobile app deployment (iOS/Android)",
+      "Understanding of mobile UI/UX principles",
+      "Experience with REST APIs and state management",
+      "Knowledge of mobile testing frameworks"
+    ],
+    "nice_to_have": [
+      "Experience with native iOS/Android development",
+      "Knowledge of app store optimization",
+      "Previous experience with payment integrations"
+    ],
+    "salary_range": "$80,000 - $120,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "indeed",
+    "title": "Cloud Solutions Architect",
+    "company": "Enterprise Cloud Services",
+    "location": "Chicago, IL",
+    "posted_at": "2024-12-29T15:45:00Z",
+    "description": "Lead cloud architecture initiatives for enterprise clients!\n\nWhat you'll do:\n- Design scalable cloud solutions for enterprise clients\n- Lead migration projects to cloud platforms\n- Provide technical guidance to development teams\n- Evaluate and recommend cloud technologies\n- Ensure security and compliance in cloud environments\n\nRequirements:\n- 5+ years of cloud architecture experience\n- Strong experience with AWS, Azure, or GCP\n- Knowledge of cloud security best practices\n- Experience with infrastructure as code\n- Strong communication and leadership skills\n- Understanding of microservices architecture\n- Experience with containerization (Docker, Kubernetes)",
+    "requirements": [
+      "5+ years of cloud architecture experience",
+      "Strong experience with AWS, Azure, or GCP",
+      "Knowledge of cloud security best practices",
+      "Experience with infrastructure as code",
+      "Strong communication and leadership skills",
+      "Understanding of microservices architecture",
+      "Experience with containerization (Docker, Kubernetes)"
+    ],
+    "nice_to_have": [
+      "Cloud certifications (AWS, Azure, GCP)",
+      "Experience with multi-cloud environments",
+      "Previous consulting experience"
+    ],
+    "salary_range": "$130,000 - $180,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "company_website",
+    "title": "Product Manager - Technical",
+    "company": "Innovation Labs",
+    "location": "Portland, OR (Remote)",
+    "posted_at": "2024-12-28T12:00:00Z",
+    "description": "Join our product team to drive technical product strategy!\n\nResponsibilities:\n- Define product roadmap and strategy\n- Collaborate with engineering teams on technical requirements\n- Analyze user feedback and market trends\n- Manage product backlog and prioritize features\n- Work with stakeholders to align product vision\n\nRequirements:\n- 4+ years of product management experience\n- Technical background (CS degree or equivalent experience)\n- Experience with agile development methodologies\n- Strong analytical and problem-solving skills\n- Excellent communication and presentation skills\n- Experience with product analytics tools\n- Understanding of software development lifecycle",
+    "requirements": [
+      "4+ years of product management experience",
+      "Technical background (CS degree or equivalent experience)",
+      "Experience with agile development methodologies",
+      "Strong analytical and problem-solving skills",
+      "Excellent communication and presentation skills",
+      "Experience with product analytics tools",
+      "Understanding of software development lifecycle"
+    ],
+    "nice_to_have": [
+      "Experience with AI/ML products",
+      "Previous startup experience",
+      "Knowledge of user research methodologies"
+    ],
+    "salary_range": "$100,000 - $150,000",
+    "employment_type": "Full-time"
+  },
+  {
+    "source": "linkedin",
+    "title": "QA Automation Engineer",
+    "company": "QualityFirst Testing",
+    "location": "Phoenix, AZ",
+    "posted_at": "2024-12-27T10:15:00Z",
+    "description": "Help us ensure the highest quality in our software products!\n\nWhat you'll do:\n- Design and implement automated test suites\n- Develop test automation frameworks\n- Perform manual testing when needed\n- Collaborate with development teams\n- Maintain and improve testing processes\n\nRequirements:\n- 3+ years of QA automation experience\n- Strong experience with test automation tools (Selenium, Cypress)\n- Proficiency in programming languages (Python, JavaScript)\n- Experience with CI/CD integration\n- Knowledge of testing methodologies\n- Experience with bug tracking systems\n- Strong attention to detail",
+    "requirements": [
+      "3+ years of QA automation experience",
+      "Strong experience with test automation tools (Selenium, Cypress)",
+      "Proficiency in programming languages (Python, JavaScript)",
+      "Experience with CI/CD integration",
+      "Knowledge of testing methodologies",
+      "Experience with bug tracking systems",
+      "Strong attention to detail"
+    ],
+    "nice_to_have": [
+      "Experience with performance testing",
+      "Knowledge of API testing",
+      "Previous experience with mobile app testing"
+    ],
+    "salary_range": "$75,000 - $110,000",
+    "employment_type": "Full-time"
+  }
+]
