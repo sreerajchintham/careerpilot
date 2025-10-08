@@ -29,6 +29,14 @@ except ImportError:
     OPENAI_AVAILABLE = False
     logger.warning("OpenAI not available. Will require embedding in request.")
 
+# Optional sentence-transformers for local embeddings
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    logger.warning("sentence-transformers not available. Will require embedding in request.")
+
 # Optional Supabase integration
 try:
     from supabase import create_client, Client
@@ -69,6 +77,17 @@ if OPENAI_AVAILABLE and os.getenv('OPENAI_API_KEY'):
     except Exception as e:
         logger.error(f"Failed to initialize OpenAI client: {e}")
         openai_client = None
+
+# Initialize sentence transformer model for local embeddings
+sentence_model = None
+if SENTENCE_TRANSFORMERS_AVAILABLE:
+    try:
+        # Use the same model as in embeddings_local.py
+        sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("✅ Sentence transformer model loaded for local embeddings")
+    except Exception as e:
+        logger.error(f"Failed to load sentence transformer model: {e}")
+        sentence_model = None
 
 
 # Pydantic models for request/response
@@ -249,6 +268,24 @@ def compute_openai_embedding(text: str) -> List[float]:
     except Exception as e:
         logger.error(f"Failed to compute OpenAI embedding: {e}")
         raise HTTPException(status_code=500, detail="Failed to compute embedding")
+
+
+def compute_local_embedding(text: str) -> List[float]:
+    """Compute embedding using local sentence-transformers model"""
+    if not sentence_model:
+        raise HTTPException(status_code=500, detail="Sentence transformer model not available")
+    
+    try:
+        # Truncate text to reasonable length for embedding
+        max_length = 512  # Most models have token limits
+        if len(text) > max_length:
+            text = text[:max_length]
+        
+        embedding = sentence_model.encode(text, convert_to_tensor=False)
+        return embedding.tolist()
+    except Exception as e:
+        logger.error(f"Failed to compute local embedding: {e}")
+        raise HTTPException(status_code=500, detail="Failed to compute local embedding")
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -566,10 +603,14 @@ async def match_jobs(request: JobMatchRequest):
             # Compute embedding using OpenAI
             resume_embedding = compute_openai_embedding(request.text)
             logger.info("Computed OpenAI embedding for job matching")
+        elif sentence_model:
+            # Compute embedding using local sentence-transformers model
+            resume_embedding = compute_local_embedding(request.text)
+            logger.info("Computed local embedding for job matching")
         else:
             raise HTTPException(
                 status_code=400, 
-                detail="No embedding provided and OpenAI not available. Please provide 'embedding' field in request."
+                detail="No embedding provided and no embedding service available. Please provide 'embedding' field in request or configure OpenAI/sentence-transformers."
             )
         
         # Step 3: Query jobs with embeddings from Supabase
@@ -642,6 +683,110 @@ async def match_jobs(request: JobMatchRequest):
         raise
     except Exception as e:
         logger.exception("Error in job matching: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# Pydantic model for resume edit proposal request
+class ResumeEditRequest(BaseModel):
+    job_id: str
+    resume_text: str
+    user_skills: List[str]
+
+
+class ResumeEditResponse(BaseModel):
+    suggestions: List[str]
+    job_title: str
+    company: str
+
+
+@app.post("/propose-resume", response_model=ResumeEditResponse)
+async def propose_resume_edits(request: ResumeEditRequest):
+    """
+    Propose resume edits to better match a specific job.
+    
+    This endpoint analyzes the user's resume against a specific job and provides
+    suggestions for improvement. In a production system, this would use AI/LLM
+    to generate personalized recommendations.
+    
+    For now, it provides basic heuristic-based suggestions.
+    """
+    try:
+        # Get job details from Supabase
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Supabase client not available")
+        
+        # Fetch job details
+        response = supabase_client.table('jobs').select('*').eq('id', request.job_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        job = response.data[0]
+        job_data = job.get('raw', {})
+        job_title = job.get('title', 'Unknown Position')
+        company = job.get('company', 'Unknown Company')
+        
+        # Extract job requirements and description
+        job_description = job_data.get('description', '')
+        job_requirements = job_data.get('requirements', [])
+        
+        # Generate suggestions based on missing skills and job requirements
+        suggestions = []
+        
+        # Analyze missing skills
+        job_skills = set()
+        job_skills.update(extract_skills_from_text(job_description))
+        for req in job_requirements:
+            job_skills.update(extract_skills_from_text(req))
+        
+        # Find skills that are in the job but not in user's resume
+        user_skills_set = set(skill.lower() for skill in request.user_skills)
+        missing_skills = []
+        
+        for job_skill in job_skills:
+            if job_skill.lower() not in user_skills_set:
+                missing_skills.append(job_skill)
+        
+        # Generate suggestions
+        if missing_skills:
+            suggestions.append(f"Consider adding these skills to your resume: {', '.join(missing_skills[:5])}")
+        
+        # Check for common resume improvements
+        if not any(keyword in request.resume_text.lower() for keyword in ['experience', 'worked', 'developed', 'created']):
+            suggestions.append("Add more action verbs and specific achievements to your experience section")
+        
+        if len(request.resume_text.split()) < 200:
+            suggestions.append("Consider expanding your resume with more detailed descriptions of your projects and achievements")
+        
+        if not any(keyword in request.resume_text.lower() for keyword in ['project', 'portfolio', 'github']):
+            suggestions.append("Include links to your projects, portfolio, or GitHub profile to showcase your work")
+        
+        # Add job-specific suggestions
+        if 'python' in job_description.lower() and 'python' not in request.resume_text.lower():
+            suggestions.append("Highlight your Python experience more prominently if you have it")
+        
+        if 'aws' in job_description.lower() and 'aws' not in request.resume_text.lower():
+            suggestions.append("Consider adding any cloud computing or AWS experience you may have")
+        
+        if 'leadership' in job_description.lower() or 'team' in job_description.lower():
+            suggestions.append("Emphasize any leadership or teamwork experience you have")
+        
+        # Default suggestion if no specific ones were generated
+        if not suggestions:
+            suggestions.append("Your resume looks good! Consider tailoring it further by using keywords from the job description")
+        
+        logger.info(f"Generated {len(suggestions)} resume suggestions for job {request.job_id}")
+        
+        return ResumeEditResponse(
+            suggestions=suggestions,
+            job_title=job_title,
+            company=company
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in resume edit proposal: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
