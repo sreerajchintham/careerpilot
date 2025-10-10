@@ -1229,6 +1229,145 @@ async def delete_user_draft(user_id: str, draft_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete draft: {str(e)}")
 
 
+# Pydantic models for application queueing
+class QueueApplicationsRequest(BaseModel):
+    user_id: str
+    job_ids: List[str]
+
+class QueuedApplication(BaseModel):
+    application_id: str
+    user_id: str
+    job_id: str
+    job_title: str
+    company: str
+    status: str
+    queued_at: str
+
+class QueueApplicationsResponse(BaseModel):
+    message: str
+    queued_count: int
+    applications: List[QueuedApplication]
+
+
+@app.post("/queue-applications", response_model=QueueApplicationsResponse)
+async def queue_applications(request: QueueApplicationsRequest):
+    """
+    Queue multiple job applications for a user.
+    
+    This endpoint allows users to select multiple jobs and queue them for application.
+    Each application is created with status 'pending' and includes metadata about
+    when it was queued.
+    
+    Validation:
+    - User must exist in the system
+    - All job_ids must be valid UUIDs
+    - All jobs must exist in the database
+    - No duplicate applications (user_id, job_id combination)
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Supabase client not available")
+        
+        # Validate user_id format
+        try:
+            uuid.UUID(request.user_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid user_id format. Must be a valid UUID.")
+        
+        # Validate all job_ids format
+        for job_id in request.job_ids:
+            try:
+                uuid.UUID(job_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid job_id format: {job_id}. Must be a valid UUID.")
+        
+        logger.info(f"Queueing {len(request.job_ids)} applications for user {request.user_id}")
+        
+        # Check if user exists
+        user_response = supabase_client.table('users').select('id').eq('id', request.user_id).execute()
+        if not user_response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if all jobs exist and get their details
+        job_details = {}
+        for job_id in request.job_ids:
+            job_response = supabase_client.table('jobs').select('id, title, company').eq('id', job_id).execute()
+            if not job_response.data:
+                raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+            job_details[job_id] = job_response.data[0]
+        
+        # Check for existing applications to avoid duplicates
+        existing_apps_response = supabase_client.table('applications').select('job_id').eq('user_id', request.user_id).in_('job_id', request.job_ids).execute()
+        existing_job_ids = {app['job_id'] for app in existing_apps_response.data} if existing_apps_response.data else set()
+        
+        # Filter out jobs that already have applications
+        new_job_ids = [job_id for job_id in request.job_ids if job_id not in existing_job_ids]
+        
+        if not new_job_ids:
+            raise HTTPException(status_code=409, detail="All selected jobs already have applications")
+        
+        # Create application records
+        applications_to_create = []
+        queued_applications = []
+        
+        for job_id in new_job_ids:
+            job_info = job_details[job_id]
+            application_id = str(uuid.uuid4())
+            
+            application_data = {
+                'id': application_id,
+                'user_id': request.user_id,
+                'job_id': job_id,
+                'status': 'draft',  # Use 'draft' instead of 'pending' to match database constraint
+                'artifacts': {},
+                'attempt_meta': {
+                    'queued_at': 'now()',
+                    'queued_by': 'user_selection',
+                    'source': 'job_matching',
+                    'status': 'queued'  # Add internal status for tracking
+                }
+            }
+            
+            applications_to_create.append(application_data)
+            
+            queued_applications.append(QueuedApplication(
+                application_id=application_id,
+                user_id=request.user_id,
+                job_id=job_id,
+                job_title=job_info['title'],
+                company=job_info['company'],
+                status='draft',  # Match the database constraint
+                queued_at='now()'
+            ))
+        
+        # Insert all applications in a single batch
+        if applications_to_create:
+            insert_response = supabase_client.table('applications').insert(applications_to_create).execute()
+            
+            if not insert_response.data:
+                raise HTTPException(status_code=500, detail="Failed to create applications")
+        
+        logger.info(f"Successfully queued {len(queued_applications)} applications for user {request.user_id}")
+        
+        # Prepare response message
+        skipped_count = len(request.job_ids) - len(new_job_ids)
+        message = f"Queued {len(queued_applications)} applications"
+        if skipped_count > 0:
+            message += f" ({skipped_count} already existed)"
+        
+        return QueueApplicationsResponse(
+            message=message,
+            queued_count=len(queued_applications),
+            applications=queued_applications
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error queueing applications: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to queue applications: {str(e)}")
+
+
 @app.get("/")
 def root():
     return {"message": "Hello World"}
