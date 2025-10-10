@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import ResumeDiffModal from '../components/ResumeDiffModal'
 
 // TypeScript interfaces for type safety
 interface JobMatch {
@@ -21,6 +22,11 @@ interface ParsedResume {
   email: string | null
   phone: string | null
   skills: string[]
+}
+
+interface SuggestionItem {
+  text: string
+  confidence: 'low' | 'med' | 'high'
 }
 
 // Resume upload page with file input, upload progress, parsing, and job matching
@@ -46,7 +52,17 @@ export default function ResumePage() {
 
   // Resume edit proposal states
   const [proposingEdits, setProposingEdits] = useState<Set<string>>(new Set())
-  const [editSuggestions, setEditSuggestions] = useState<{[jobId: string]: string[]}>({})
+  const [editSuggestions, setEditSuggestions] = useState<{[jobId: string]: SuggestionItem[]}>({})
+  
+  // Modal states
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [selectedJob, setSelectedJob] = useState<{title: string, company: string} | null>(null)
+  
+  // Application queue states
+  const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set())
+  const [queueing, setQueueing] = useState(false)
+  const [queueSuccess, setQueueSuccess] = useState(false)
+  const [queueError, setQueueError] = useState<string>('')
 
   // Handle file selection from input
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -64,6 +80,11 @@ export default function ResumePage() {
     setUserSkills([])
     setProposingEdits(new Set())
     setEditSuggestions({})
+    setIsModalOpen(false)
+    setSelectedJob(null)
+    setSelectedJobs(new Set())
+    setQueueSuccess(false)
+    setQueueError('')
   }
 
   // Handle file upload to backend
@@ -83,6 +104,11 @@ export default function ResumePage() {
     setJobMatches([])
     setUserSkills([])
     setEditSuggestions({})
+    setIsModalOpen(false)
+    setSelectedJob(null)
+    setSelectedJobs(new Set())
+    setQueueSuccess(false)
+    setQueueError('')
 
     try {
       setUploading(true)
@@ -238,8 +264,7 @@ export default function ResumePage() {
         },
         body: JSON.stringify({
           job_id: jobId,
-          resume_text: resumeText,
-          user_skills: userSkills
+          resume_text: resumeText
         }),
       })
 
@@ -264,6 +289,107 @@ export default function ResumePage() {
         newSet.delete(jobId)
         return newSet
       })
+    }
+  }
+
+  // Open the resume diff modal
+  function openResumeDiffModal(job: JobMatch) {
+    setSelectedJob({
+      title: job.title,
+      company: job.company
+    })
+    setIsModalOpen(true)
+  }
+
+  // Close the modal
+  function closeModal() {
+    setIsModalOpen(false)
+    setSelectedJob(null)
+  }
+
+  // Generate a consistent user ID for this session (same as in modal)
+  function generateUserId(): string {
+    const STORAGE_KEY = 'careerpilot_user_id'
+    let userId = localStorage.getItem(STORAGE_KEY)
+    
+    if (!userId) {
+      userId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0
+        const v = c === 'x' ? r : (r & 0x3 | 0x8)
+        return v.toString(16)
+      })
+      localStorage.setItem(STORAGE_KEY, userId)
+    }
+    
+    return userId
+  }
+
+  // Toggle job selection for queueing
+  function toggleJobSelection(jobId: string) {
+    setSelectedJobs(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(jobId)) {
+        newSet.delete(jobId)
+      } else {
+        newSet.add(jobId)
+      }
+      return newSet
+    })
+  }
+
+  // Select all jobs
+  function selectAllJobs() {
+    const allJobIds = new Set(jobMatches.map(job => job.job_id))
+    setSelectedJobs(allJobIds)
+  }
+
+  // Deselect all jobs
+  function deselectAllJobs() {
+    setSelectedJobs(new Set())
+  }
+
+  // Queue selected applications
+  async function queueSelectedApplications() {
+    if (selectedJobs.size === 0) {
+      setQueueError('Please select at least one job to queue')
+      return
+    }
+
+    setQueueing(true)
+    setQueueError('')
+    setQueueSuccess(false)
+
+    try {
+      const response = await fetch('http://127.0.0.1:8001/queue-applications', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          user_id: generateUserId(),
+          job_ids: Array.from(selectedJobs)
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || `Failed to queue applications: ${response.status}`)
+      }
+
+      const data = await response.json()
+      
+      setQueueSuccess(true)
+      setSelectedJobs(new Set()) // Clear selection after successful queue
+      
+      // Auto-hide success message after 3 seconds
+      setTimeout(() => {
+        setQueueSuccess(false)
+      }, 3000)
+
+    } catch (error: any) {
+      setQueueError(error.message || 'Failed to queue applications')
+    } finally {
+      setQueueing(false)
     }
   }
 
@@ -412,12 +538,50 @@ export default function ResumePage() {
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-semibold text-gray-900">
-                Job Matches ({jobMatches.length})
+                🎯 Job Matches ({jobMatches.length})
               </h2>
-              {matching && (
+              
+              {matching ? (
                 <div className="flex items-center space-x-2 text-sm text-gray-600">
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
                   <span>Finding matches...</span>
+                </div>
+              ) : (
+                <div className="flex items-center space-x-3">
+                  <span className="text-sm text-gray-600">
+                    {selectedJobs.size} selected
+                  </span>
+                  <button
+                    onClick={selectAllJobs}
+                    className="text-sm text-blue-600 hover:text-blue-800 font-medium"
+                  >
+                    Select All
+                  </button>
+                  <button
+                    onClick={deselectAllJobs}
+                    className="text-sm text-gray-600 hover:text-gray-800 font-medium"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={queueSelectedApplications}
+                    disabled={selectedJobs.size === 0 || queueing}
+                    className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center space-x-2"
+                  >
+                    {queueing ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        <span>Queueing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                        </svg>
+                        <span>Queue Selected ({selectedJobs.size})</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               )}
             </div>
@@ -427,8 +591,36 @@ export default function ResumePage() {
               {jobMatches.map((job) => (
                 <div
                   key={job.job_id}
-                  className="border border-gray-200 rounded-lg p-6 hover:shadow-md transition-shadow"
+                  className={`border rounded-lg p-6 hover:shadow-md transition-all duration-200 ${
+                    selectedJobs.has(job.job_id) 
+                      ? 'border-green-500 bg-green-50 ring-2 ring-green-200' 
+                      : 'border-gray-200 bg-white'
+                  }`}
                 >
+                  {/* Selection Checkbox */}
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center space-x-3">
+                      <input
+                        type="checkbox"
+                        id={`job-${job.job_id}`}
+                        checked={selectedJobs.has(job.job_id)}
+                        onChange={() => toggleJobSelection(job.job_id)}
+                        className="h-4 w-4 text-green-600 border-gray-300 rounded focus:ring-green-500"
+                      />
+                      <label htmlFor={`job-${job.job_id}`} className="text-sm font-medium text-gray-700 cursor-pointer">
+                        Queue for Application
+                      </label>
+                    </div>
+                    {selectedJobs.has(job.job_id) && (
+                      <div className="flex items-center space-x-1 text-green-600">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        <span className="text-xs font-medium">Selected</span>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Job Header */}
                   <div className="mb-4">
                     <h3 className="text-lg font-semibold text-gray-900 mb-1">
@@ -496,22 +688,36 @@ export default function ResumePage() {
                     </div>
                   )}
 
-                  {/* Action Button */}
-                  <button
-                    onClick={() => proposeResumeEdits(job.job_id)}
-                    disabled={proposingEdits.has(job.job_id)}
-                    className="w-full mt-4 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center space-x-2"
-                    aria-describedby={`propose-${job.job_id}`}
-                  >
-                    {proposingEdits.has(job.job_id) ? (
-                      <>
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                        <span>Generating Suggestions...</span>
-                      </>
-                    ) : (
-                      <span>Propose Resume Edits</span>
+                  {/* Action Buttons */}
+                  <div className="mt-4 space-y-2">
+                    <button
+                      onClick={() => proposeResumeEdits(job.job_id)}
+                      disabled={proposingEdits.has(job.job_id)}
+                      className="w-full px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center space-x-2"
+                      aria-describedby={`propose-${job.job_id}`}
+                    >
+                      {proposingEdits.has(job.job_id) ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                          <span>Generating Suggestions...</span>
+                        </>
+                      ) : (
+                        <span>Generate Suggestions</span>
+                      )}
+                    </button>
+                    
+                    {editSuggestions[job.job_id] && editSuggestions[job.job_id].length > 0 && (
+                      <button
+                        onClick={() => openResumeDiffModal(job)}
+                        className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center space-x-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                        <span>Review & Apply Suggestions</span>
+                      </button>
                     )}
-                  </button>
+                  </div>
                   <p id={`propose-${job.job_id}`} className="sr-only">
                     Get personalized suggestions to improve your resume for this job
                   </p>
@@ -519,21 +725,82 @@ export default function ResumePage() {
                   {/* Edit Suggestions Display */}
                   {editSuggestions[job.job_id] && (
                     <div className="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-md">
-                      <h4 className="text-sm font-medium text-purple-900 mb-2">
-                        💡 Resume Improvement Suggestions
-                      </h4>
-                      <ul className="space-y-2">
-                        {editSuggestions[job.job_id].map((suggestion, index) => (
-                          <li key={index} className="text-sm text-purple-800 flex items-start">
-                            <span className="inline-block w-1.5 h-1.5 bg-purple-400 rounded-full mt-2 mr-2 flex-shrink-0"></span>
-                            {suggestion}
-                          </li>
-                        ))}
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-sm font-medium text-purple-900">
+                          💡 Resume Improvement Suggestions
+                        </h4>
+                        <div className="text-xs text-purple-600 bg-purple-100 px-2 py-1 rounded">
+                          {editSuggestions[job.job_id].length} suggestions
+                        </div>
+                      </div>
+                      
+                      {/* Important Notice */}
+                      <div className="mb-3 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800">
+                        ⚠️ <strong>Important:</strong> These are suggestions only. Please review and approve any changes before updating your resume.
+                      </div>
+                      
+                      <ul className="space-y-3">
+                        {editSuggestions[job.job_id].map((suggestion, index) => {
+                          // Determine confidence styling
+                          const confidenceColors = {
+                            high: { bg: 'bg-green-100', text: 'text-green-800', border: 'border-green-200', dot: 'bg-green-500' },
+                            med: { bg: 'bg-yellow-100', text: 'text-yellow-800', border: 'border-yellow-200', dot: 'bg-yellow-500' },
+                            low: { bg: 'bg-gray-100', text: 'text-gray-700', border: 'border-gray-200', dot: 'bg-gray-400' }
+                          }
+                          
+                          const colors = confidenceColors[suggestion.confidence] || confidenceColors.med
+                          
+                          return (
+                            <li key={index} className={`p-3 rounded-md border ${colors.bg} ${colors.border}`}>
+                              <div className="flex items-start space-x-2">
+                                <span className={`inline-block w-2 h-2 ${colors.dot} rounded-full mt-2 flex-shrink-0`}></span>
+                                <div className="flex-1">
+                                  <p className={`text-sm ${colors.text} font-medium`}>
+                                    {suggestion.text}
+                                  </p>
+                                  <div className="mt-1 flex items-center space-x-2">
+                                    <span className={`text-xs px-2 py-1 rounded-full ${colors.bg} ${colors.text} border ${colors.border}`}>
+                                      {suggestion.confidence} confidence
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            </li>
+                          )
+                        })}
                       </ul>
                     </div>
                   )}
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Queue Success/Error Messages */}
+        {queueSuccess && (
+          <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+            <div className="flex items-center space-x-2">
+              <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              <span className="text-sm font-medium text-green-800">
+                Applications queued successfully! Your selected jobs have been added to your application queue.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {queueError && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <div className="flex items-start space-x-2">
+              <svg className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <p className="text-sm font-medium text-red-800">Failed to queue applications</p>
+                <p className="text-xs text-red-600 mt-1">{queueError}</p>
+              </div>
             </div>
           </div>
         )}
@@ -551,6 +818,21 @@ export default function ResumePage() {
               This may take a few moments depending on your resume size
             </p>
           </div>
+        )}
+
+        {/* Resume Diff Modal */}
+        {isModalOpen && selectedJob && (
+          <ResumeDiffModal
+            isOpen={isModalOpen}
+            onClose={closeModal}
+            originalResume={resumeText}
+            suggestions={jobMatches
+              .filter(job => job.title === selectedJob.title && job.company === selectedJob.company)
+              .flatMap(job => editSuggestions[job.job_id] || [])
+            }
+            jobTitle={selectedJob.title}
+            company={selectedJob.company}
+          />
         )}
       </div>
     </main>
