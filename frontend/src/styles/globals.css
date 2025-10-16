@@ -2,6 +2,208 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Dark Futuristic Theme */
+:root {
+  --bg-primary: #0a0a0a;
+  --bg-secondary: #111111;
+  --bg-tertiary: #1a1a1a;
+  --accent-primary: #00ff88;
+  --accent-secondary: #00d4ff;
+  --accent-tertiary: #ff6b35;
+  --text-primary: #ffffff;
+  --text-secondary: #b3b3b3;
+  --text-muted: #666666;
+  --border-primary: #333333;
+  --border-accent: #00ff88;
+  --shadow-glow: 0 0 20px rgba(0, 255, 136, 0.3);
+  --shadow-glow-blue: 0 0 20px rgba(0, 212, 255, 0.3);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: linear-gradient(135deg, #0a0a0a 0%, #111111 50%, #0a0a0a 100%);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  min-height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--accent-primary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-secondary);
+}
+
+/* Glow effects */
+.glow-green {
+  box-shadow: var(--shadow-glow);
+}
+
+.glow-blue {
+  box-shadow: var(--shadow-glow-blue);
+}
+
+/* Animated background */
+.animated-bg {
+  background: linear-gradient(-45deg, #0a0a0a, #111111, #1a1a1a, #0a0a0a);
+  background-size: 400% 400%;
+  animation: gradientShift 15s ease infinite;
+}
+
+@keyframes gradientShift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* Futuristic button styles */
+.btn-futuristic {
+  @apply relative overflow-hidden;
+  background: linear-gradient(45deg, var(--accent-primary), var(--accent-secondary));
+  border: 2px solid var(--accent-primary);
+  color: var(--bg-primary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  transition: all 0.3s ease;
+}
+
+.btn-futuristic:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-glow);
+}
+
+.btn-futuristic::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+  transition: left 0.5s;
+}
+
+.btn-futuristic:hover::before {
+  left: 100%;
+}
+
+/* Card styles */
+.card-futuristic {
+  background: rgba(17, 17, 17, 0.8);
+  border: 1px solid var(--border-primary);
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease;
+}
+
+.card-futuristic:hover {
+  border-color: var(--accent-primary);
+  box-shadow: var(--shadow-glow);
+  transform: translateY(-4px);
+}
+
+/* Input styles */
+.input-futuristic {
+  background: rgba(26, 26, 26, 0.8);
+  border: 2px solid var(--border-primary);
+  color: var(--text-primary);
+  transition: all 0.3s ease;
+}
+
+.input-futuristic:focus {
+  border-color: var(--accent-primary);
+  box-shadow: var(--shadow-glow);
+  outline: none;
+}
+
+/* Status indicators */
+.status-glow {
+  position: relative;
+}
+
+.status-glow::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  height: 100%;
+  background: inherit;
+  border-radius: inherit;
+  transform: translate(-50%, -50%);
+  filter: blur(8px);
+  opacity: 0.3;
+  z-index: -1;
+}
+
+/* Sidebar collapse animations */
+.sidebar-collapsed {
+  transform: translateX(0);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-expanded {
+  transform: translateX(0);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Tooltip styles */
+.tooltip {
+  position: relative;
+}
+
+.tooltip::before {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 8px;
+  padding: 6px 12px;
+  background: rgba(0, 0, 0, 0.9);
+  color: white;
+  border-radius: 6px;
+  font-size: 14px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 1000;
+}
+
+.tooltip::after {
+  content: '';
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 2px;
+  border: 4px solid transparent;
+  border-right-color: rgba(0, 0, 0, 0.9);
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 1000;
+}
+
+.tooltip:hover::before,
+.tooltip:hover::after {
+  opacity: 1;
+}
+
 /* App-level base styles */
 html, body, #__next {
   height: 100%;

@@ -13,6 +13,7 @@ import pdfplumber
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timezone
 
 # Configure basic logging to stdout. In production, prefer structured logging.
 logging.basicConfig(
@@ -21,21 +22,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("careerpilot.backend")
 
-# Optional OpenAI integration for embeddings
+# Gemini AI integration for embeddings
 try:
-    import openai
-    OPENAI_AVAILABLE = True
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
-    logger.warning("OpenAI not available. Will require embedding in request.")
-
-# Optional sentence-transformers for local embeddings
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
-    logger.warning("sentence-transformers not available. Will require embedding in request.")
+    GEMINI_AVAILABLE = False
+    logger.warning("Gemini AI not available. Will require embedding in request.")
 
 # Optional Supabase integration
 try:
@@ -58,36 +51,29 @@ app = FastAPI(title="CareerPilot Agent API")
 supabase_client: Optional[Client] = None
 if SUPABASE_AVAILABLE:
     supabase_url = os.getenv('SUPABASE_URL')
-    supabase_key = os.getenv('SUPABASE_ANON_KEY')
+    # Use service role key for backend operations (bypasses RLS)
+    supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_ANON_KEY')
     if supabase_url and supabase_key:
         try:
             supabase_client = create_client(supabase_url, supabase_key)
-            logger.info("✅ Supabase client initialized for job matching")
+            if os.getenv('SUPABASE_SERVICE_ROLE_KEY'):
+                logger.info("✅ Supabase client initialized with service role key (full access)")
+            else:
+                logger.warning("⚠️  Supabase client initialized with anon key (limited by RLS). Set SUPABASE_SERVICE_ROLE_KEY for full access.")
         except Exception as e:
             logger.error(f"Failed to initialize Supabase client: {e}")
             supabase_client = None
 
-# Initialize OpenAI client if available
-openai_client = None
-if OPENAI_AVAILABLE and os.getenv('OPENAI_API_KEY'):
+# Initialize Gemini AI client if available
+gemini_configured = False
+if GEMINI_AVAILABLE and os.getenv('GEMINI_API_KEY'):
     try:
-        openai.api_key = os.getenv('OPENAI_API_KEY')
-        openai_client = openai
-        logger.info("✅ OpenAI client initialized for embeddings")
+        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+        gemini_configured = True
+        logger.info("✅ Gemini AI configured for embeddings")
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI client: {e}")
-        openai_client = None
-
-# Initialize sentence transformer model for local embeddings
-sentence_model = None
-if SENTENCE_TRANSFORMERS_AVAILABLE:
-    try:
-        # Use the same model as in embeddings_local.py
-        sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("✅ Sentence transformer model loaded for local embeddings")
-    except Exception as e:
-        logger.error(f"Failed to load sentence transformer model: {e}")
-        sentence_model = None
+        logger.error(f"Failed to configure Gemini AI: {e}")
+        gemini_configured = False
 
 
 # Pydantic models for request/response
@@ -113,9 +99,114 @@ class JobMatchResponse(BaseModel):
     user_skills: List[str]
 
 
-def simple_parse_resume(text: str) -> Dict[str, any]:
+def gemini_parse_resume(text: str) -> Dict[str, any]:
     """
-    Extract key information from resume text using regex heuristics.
+    Extract key information from resume text using Gemini AI for intelligent parsing.
+    
+    Uses Google's Gemini AI to understand context and extract:
+    - Name
+    - Email addresses
+    - Phone numbers
+    - Skills (technical and soft skills)
+    - Work experience summary
+    - Education summary
+    - Years of experience
+    - Job titles
+    
+    Falls back to regex-based parsing if Gemini AI is not configured.
+    
+    Returns structured data for further processing.
+    """
+    if not gemini_configured:
+        logger.warning("Gemini AI not configured, falling back to regex-based parsing")
+        return simple_parse_resume_regex(text)
+    
+    try:
+        # Truncate text if too long (Gemini has context limits)
+        max_length = 30000
+        if len(text) > max_length:
+            text = text[:max_length] + "\n... [truncated]"
+        
+        # Create the prompt for Gemini
+        prompt = f"""
+You are an expert resume parser. Extract the following information from this resume text and return it as a JSON object.
+
+Extract:
+1. name: The person's full name (string)
+2. email: Email address (string)
+3. phone: Phone number (string, format as digits only)
+4. skills: List of technical and professional skills (array of strings, limit to 30 most relevant skills)
+5. experience_years: Estimated years of professional experience (number)
+6. current_title: Most recent or current job title (string)
+7. education: Highest degree and field of study (string)
+8. location: City/State/Country if mentioned (string)
+9. summary: Brief 2-3 sentence professional summary (string)
+
+Return ONLY a valid JSON object with these exact keys. If a field is not found, use null for strings, 0 for numbers, or empty array for lists.
+
+Resume Text:
+{text}
+
+JSON Output:
+"""
+        
+        # Initialize Gemini model
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # Generate response
+        response = model.generate_content(prompt)
+        
+        # Parse the JSON response
+        result_text = response.text.strip()
+        
+        # Remove markdown code blocks if present
+        if result_text.startswith('```'):
+            result_text = result_text.split('```')[1]
+            if result_text.startswith('json'):
+                result_text = result_text[4:]
+        
+        result_text = result_text.strip()
+        
+        # Parse JSON
+        parsed_data = json.loads(result_text)
+        
+        # Ensure all expected fields exist
+        default_result = {
+            "name": None,
+            "email": None,
+            "phone": None,
+            "skills": [],
+            "experience_years": 0,
+            "current_title": None,
+            "education": None,
+            "location": None,
+            "summary": None
+        }
+        
+        # Merge with defaults
+        for key in default_result:
+            if key not in parsed_data or parsed_data[key] is None:
+                parsed_data[key] = default_result[key]
+        
+        logger.info(f"Successfully parsed resume using Gemini AI. Found {len(parsed_data.get('skills', []))} skills")
+        
+        return parsed_data
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse Gemini response as JSON: {e}")
+        logger.warning("Falling back to regex-based parsing")
+        return simple_parse_resume_regex(text)
+    except Exception as e:
+        logger.error(f"Gemini AI parsing failed: {e}")
+        logger.warning("Falling back to regex-based parsing")
+        return simple_parse_resume_regex(text)
+
+
+def simple_parse_resume_regex(text: str) -> Dict[str, any]:
+    """
+    Fallback: Extract key information from resume text using regex heuristics.
+    
+    This is used when Gemini AI is not available or fails.
     
     Looks for:
     - Email addresses (standard email format)
@@ -128,57 +219,45 @@ def simple_parse_resume(text: str) -> Dict[str, any]:
         "name": None,
         "email": None,
         "phone": None,
-        "skills": []
+        "skills": [],
+        "experience_years": 0,
+        "current_title": None,
+        "education": None,
+        "location": None,
+        "summary": None
     }
     
     # Name extraction - look for common patterns at the beginning
-    # Usually the first line or first few lines contain the name
     lines = text.strip().split('\n')
     for i, line in enumerate(lines[:5]):  # Check first 5 lines
         line = line.strip()
         if line and len(line) < 50:  # Reasonable name length
-            # Skip common headers
             if not any(header in line.lower() for header in ['resume', 'cv', 'curriculum', 'contact', 'email', 'phone']):
-                # Check if it looks like a name (2-4 words, mostly letters)
                 words = line.split()
                 if 2 <= len(words) <= 4 and all(word.replace('.', '').replace('-', '').isalpha() for word in words):
                     result["name"] = line
                     break
     
-    # Email regex - looks for standard email format
+    # Email regex
     email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
     email_match = re.search(email_pattern, text)
     if email_match:
         result["email"] = email_match.group()
     
-    # Phone regex - looks for 10-digit US phone numbers with optional formatting
-    # Handles: (123) 456-7890, 123-456-7890, 123.456.7890, 1234567890
+    # Phone regex
     phone_pattern = r'\b(?:\(?(\d{3})\)?[-.\s]?)?(\d{3})[-.\s]?(\d{4})\b'
     phone_matches = re.findall(phone_pattern, text)
     if phone_matches:
-        # Take the first valid phone number found
         area, prefix, number = phone_matches[0]
-        if area:  # Full 10-digit number
+        if area:
             result["phone"] = f"{area}{prefix}{number}"
-        elif len(prefix) == 3 and len(number) == 4:  # 7-digit, might be incomplete
-            # Look for area code nearby
-            phone_context = text[max(0, text.find(phone_matches[0][1]) - 50):text.find(phone_matches[0][1]) + 50]
-            area_match = re.search(r'\b(\d{3})\b', phone_context)
-            if area_match:
-                result["phone"] = f"{area_match.group(1)}{prefix}{number}"
     
-    # Skills extraction - look for common skills section headers
-    # Collect ALL skills sections, not just the first one
+    # Skills extraction
     all_skills_text = []
-    
     skills_patterns = [
         r'Skills?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
         r'(?:Technical\s+)?Skills?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
         r'Core\s+Competencies?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Technologies?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Programming\s+Languages?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Expertise\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Proficiencies?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)'
     ]
     
     for pattern in skills_patterns:
@@ -189,103 +268,60 @@ def simple_parse_resume(text: str) -> Dict[str, any]:
                 all_skills_text.append(skills_section)
     
     if all_skills_text:
-        # Process each skills section found
         all_skills = []
         for skills_text in all_skills_text:
-            # Clean up the skills text first
-            skills_text = re.sub(r'\n\s*', ' ', skills_text)  # Replace newlines with spaces
-            skills_text = re.sub(r'\s+', ' ', skills_text)   # Normalize whitespace
-            
-            # Split skills by common delimiters and clean up
-            # Split skills by common delimiters, prioritizing commas and newlines
-            skills = []
-            
-            # First try comma separation (most common)
+            skills_text = re.sub(r'\s+', ' ', skills_text)
             if ',' in skills_text:
                 skills = [skill.strip() for skill in skills_text.split(',')]
-            # Then try newline separation
-            elif '\n' in skills_text:
-                skills = [skill.strip() for skill in skills_text.split('\n')]
-            # Then try other delimiters
             else:
-                for delimiter in [';', '|', '•', '·']:
-                    if delimiter in skills_text:
-                        skills = [skill.strip() for skill in skills_text.split(delimiter)]
-                        break
-            
-            # If we still have combined skills (like "React - AWS"), split by dashes too
-            if skills:
-                expanded_skills = []
-                for skill in skills:
-                    if ' - ' in skill or ' -' in skill or '- ' in skill:
-                        # Split by dashes and add each part
-                        parts = re.split(r'\s*-\s*', skill)
-                        expanded_skills.extend([part.strip() for part in parts if part.strip()])
-                    else:
-                        expanded_skills.append(skill)
-                skills = expanded_skills
-            
-            # If no delimiter found, try to split by multiple spaces or common patterns
-            if not skills:
                 skills = re.split(r'\s{2,}|\t+', skills_text)
             
-            # Clean up skills - remove empty strings and common prefixes
             for skill in skills:
                 skill = skill.strip()
-                if skill and len(skill) > 2:  # Skip single characters and very short strings
-                    # Remove common prefixes like "•", "-", "*", "●"
+                if skill and len(skill) > 2 and len(skill) < 50:
                     skill = re.sub(r'^[•●\-*\s]+', '', skill)
-                    # Remove trailing punctuation
                     skill = re.sub(r'[.,;:]+$', '', skill)
-                    # Skip if it's too long (likely not a skill) or contains common non-skill words
-                    if (len(skill) < 50 and 
-                        skill and 
-                        skill not in all_skills and
-                        not any(word in skill.lower() for word in ['experience', 'years', 'worked', 'developed', 'created', 'built'])):
+                    if skill and skill not in all_skills:
                         all_skills.append(skill)
         
-        result["skills"] = all_skills[:20]  # Limit to first 20 skills
+        result["skills"] = all_skills[:30]
     
     return result
 
 
-def compute_openai_embedding(text: str) -> List[float]:
+# Alias for backward compatibility
+simple_parse_resume = gemini_parse_resume
+
+
+def compute_gemini_embedding(text: str, task_type: str = "retrieval_query") -> List[float]:
     """
-    Compute embedding using OpenAI's text-embedding-ada-002 model.
+    Compute embedding using Gemini AI's text-embedding-004 model.
+    
+    Args:
+        text: Text to embed
+        task_type: Type of embedding task ("retrieval_query" for queries, "retrieval_document" for documents)
     
     Note: In production, consider using pgvector extension for PostgreSQL
     to store and query embeddings efficiently with cosine similarity.
     """
-    if not openai_client:
-        raise HTTPException(status_code=500, detail="OpenAI client not available")
+    if not gemini_configured:
+        raise HTTPException(status_code=500, detail="Gemini AI not configured")
     
     try:
-        response = openai_client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=text
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.error(f"Failed to compute OpenAI embedding: {e}")
-        raise HTTPException(status_code=500, detail="Failed to compute embedding")
-
-
-def compute_local_embedding(text: str) -> List[float]:
-    """Compute embedding using local sentence-transformers model"""
-    if not sentence_model:
-        raise HTTPException(status_code=500, detail="Sentence transformer model not available")
-    
-    try:
-        # Truncate text to reasonable length for embedding
-        max_length = 512  # Most models have token limits
+        # Truncate text to reasonable length
+        max_length = 2000  # Gemini can handle longer texts
         if len(text) > max_length:
             text = text[:max_length]
         
-        embedding = sentence_model.encode(text, convert_to_tensor=False)
-        return embedding.tolist()
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text,
+            task_type=task_type
+        )
+        return result['embedding']
     except Exception as e:
-        logger.error(f"Failed to compute local embedding: {e}")
-        raise HTTPException(status_code=500, detail="Failed to compute local embedding")
+        logger.error(f"Failed to compute Gemini embedding: {e}")
+        raise HTTPException(status_code=500, detail="Failed to compute embedding")
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -473,17 +509,28 @@ async def upload_resume(file: UploadFile = File(...)):
 @app.post("/parse-resume")
 async def parse_resume(file: UploadFile = File(...)):
     """
-    Extracts text from uploaded PDF using pdfplumber.
+    Extracts text from uploaded PDF using pdfplumber and parses it using Gemini AI.
+    
+    This endpoint:
+    1. Extracts text from PDF using pdfplumber
+    2. Parses the text using Gemini AI for intelligent extraction
+    3. Falls back to regex parsing if Gemini AI is unavailable
+    
+    Returns:
+    - text: Full extracted resume text
+    - parsed: Structured data including:
+      - name, email, phone
+      - skills (up to 30)
+      - experience_years
+      - current_title
+      - education
+      - location
+      - summary (AI-generated)
     
     Common PDF extraction challenges:
     - Multi-column layouts: pdfplumber handles these better than basic text extraction
     - Scanned PDFs: These are images and need OCR (not implemented here)
-    - Tables: pdfplumber can extract table data, but we're focusing on text
-    - Images with text: Won't extract text from images
-    - Complex formatting: May lose some formatting but preserves text content
     - Password-protected PDFs: Will fail unless password is provided
-    
-    Returns first 20,000 characters to avoid overwhelming responses.
     """
     try:
         # Read the uploaded file content
@@ -522,8 +569,9 @@ async def parse_resume(file: UploadFile = File(...)):
                 
                 if extracted_text.strip():
                     logger.info("Successfully extracted %d characters from PDF", len(extracted_text))
-                    # Parse the extracted text for structured data
+                    # Parse the extracted text using Gemini AI (or fallback to regex)
                     parsed_data = simple_parse_resume(extracted_text.strip())
+                    logger.info(f"✅ Resume parsed successfully. Extracted {len(parsed_data.get('skills', []))} skills")
                     return {
                         "text": extracted_text.strip(),
                         "parsed": parsed_data
@@ -532,7 +580,17 @@ async def parse_resume(file: UploadFile = File(...)):
                     logger.warning("No text could be extracted from PDF - may be scanned/image-based")
                     return {
                         "text": "",
-                        "parsed": {"name": None, "email": None, "phone": None, "skills": []},
+                        "parsed": {
+                            "name": None,
+                            "email": None,
+                            "phone": None,
+                            "skills": [],
+                            "experience_years": 0,
+                            "current_title": None,
+                            "education": None,
+                            "location": None,
+                            "summary": None
+                        },
                         "error": "No text found in PDF. This may be a scanned document or image-based PDF that requires OCR."
                     }
                     
@@ -553,7 +611,17 @@ async def parse_resume(file: UploadFile = File(...)):
             
             return {
                 "text": "",
-                "parsed": {"name": None, "email": None, "phone": None, "skills": []},
+                "parsed": {
+                    "name": None,
+                    "email": None,
+                    "phone": None,
+                    "skills": [],
+                    "experience_years": 0,
+                    "current_title": None,
+                    "education": None,
+                    "location": None,
+                    "summary": None
+                },
                 "error": f"Failed to parse PDF: {str(pdf_error)}. This may be a corrupted file or unsupported format."
             }
             
@@ -599,18 +667,14 @@ async def match_jobs(request: JobMatchRequest):
             # Use provided embedding
             resume_embedding = request.embedding
             logger.info("Using provided embedding for job matching")
-        elif openai_client:
-            # Compute embedding using OpenAI
-            resume_embedding = compute_openai_embedding(request.text)
-            logger.info("Computed OpenAI embedding for job matching")
-        elif sentence_model:
-            # Compute embedding using local sentence-transformers model
-            resume_embedding = compute_local_embedding(request.text)
-            logger.info("Computed local embedding for job matching")
+        elif gemini_configured:
+            # Compute embedding using Gemini AI (use retrieval_query for resume queries)
+            resume_embedding = compute_gemini_embedding(request.text, task_type="retrieval_query")
+            logger.info("Computed Gemini AI embedding for job matching")
         else:
             raise HTTPException(
                 status_code=400, 
-                detail="No embedding provided and no embedding service available. Please provide 'embedding' field in request or configure OpenAI/sentence-transformers."
+                detail="No embedding provided and Gemini AI not configured. Please provide 'embedding' field in request or configure GEMINI_API_KEY."
             )
         
         # Step 3: Query jobs with embeddings from Supabase
@@ -1249,6 +1313,21 @@ class QueueApplicationsResponse(BaseModel):
     applications: List[QueuedApplication]
 
 
+# API Job Scraper models
+class ScrapeJobsRequest(BaseModel):
+    api: str = "all"  # 'adzuna' | 'themuse' | 'remoteok' | 'all'
+    keywords: str
+    location: str = "Remote"
+    max_results: int = 50
+
+
+class ScrapeJobsResponse(BaseModel):
+    message: str
+    total_found: int
+    saved: int
+    sources: List[str]
+
+
 @app.post("/queue-applications", response_model=QueueApplicationsResponse)
 async def queue_applications(request: QueueApplicationsRequest):
     """
@@ -1283,10 +1362,35 @@ async def queue_applications(request: QueueApplicationsRequest):
         
         logger.info(f"Queueing {len(request.job_ids)} applications for user {request.user_id}")
         
-        # Check if user exists
-        user_response = supabase_client.table('users').select('id').eq('id', request.user_id).execute()
-        if not user_response.data:
-            raise HTTPException(status_code=404, detail="User not found")
+        # Ensure user exists in users table (auto-create if needed for foreign key constraint)
+        try:
+            user_check = supabase_client.table('users').select('id').eq('id', request.user_id).execute()
+            if not user_check.data:
+                # User doesn't exist, create them with email from Supabase Auth (service role required)
+                logger.info(f"Auto-creating user record for {request.user_id}")
+
+                user_email: Optional[str] = None
+                try:
+                    # Attempt to fetch the auth user to get a verified email
+                    auth_user_resp = supabase_client.auth.admin.get_user_by_id(request.user_id)
+                    if getattr(auth_user_resp, 'user', None) is not None:
+                        user_email = getattr(auth_user_resp.user, 'email', None)
+                except Exception as auth_err:
+                    logger.warning(f"Could not fetch auth user for {request.user_id}: {auth_err}")
+
+                if not user_email:
+                    # Fallback placeholder to satisfy NOT NULL; can be updated later by profile flow
+                    user_email = f"{request.user_id}@placeholder.local"
+
+                user_data = {
+                    'id': request.user_id,
+                    'email': user_email,
+                    'profile': {}
+                }
+                supabase_client.table('users').insert(user_data).execute()
+                logger.info(f"✅ Created user record for {request.user_id} with email {user_email}")
+        except Exception as e:
+            logger.warning(f"Could not ensure user exists: {e}. Continuing anyway...")
         
         # Check if all jobs exist and get their details
         job_details = {}
@@ -1318,7 +1422,7 @@ async def queue_applications(request: QueueApplicationsRequest):
                 'id': application_id,
                 'user_id': request.user_id,
                 'job_id': job_id,
-                'status': 'draft',  # Use 'draft' instead of 'pending' to match database constraint
+                'status': 'draft',  # Use a valid status per schema; worker should process 'draft'
                 'artifacts': {},
                 'attempt_meta': {
                     'queued_at': 'now()',
@@ -1336,7 +1440,7 @@ async def queue_applications(request: QueueApplicationsRequest):
                 job_id=job_id,
                 job_title=job_info['title'],
                 company=job_info['company'],
-                status='draft',  # Match the database constraint
+                status='draft',
                 queued_at='now()'
             ))
         
@@ -1366,6 +1470,195 @@ async def queue_applications(request: QueueApplicationsRequest):
     except Exception as e:
         logger.exception("Error queueing applications: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Failed to queue applications: {str(e)}")
+
+
+@app.post("/scrape-jobs", response_model=ScrapeJobsResponse)
+async def scrape_jobs(request: ScrapeJobsRequest):
+    """
+    Trigger API-based job fetching and save results to the database.
+    """
+    try:
+        # Import locally so that server can boot even if workers deps missing
+        from workers.api_job_fetcher import AdzunaFetcher, TheMuseFetcher, RemoteOKFetcher
+    except Exception as imp_err:
+        raise HTTPException(status_code=500, detail=f"Job fetchers not available: {imp_err}")
+
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Supabase client not available")
+
+    sources: List[str] = []
+    all_jobs: List[Dict[str, Any]] = []
+
+    api = (request.api or "all").lower()
+    keywords = request.keywords
+    location = request.location or "Remote"
+    max_results = max(1, min(request.max_results or 50, 100))
+
+    # Collect jobs
+    if api in ("adzuna", "all"):
+        sources.append("adzuna")
+        fetcher = AdzunaFetcher()
+        all_jobs.extend(fetcher.fetch_jobs(keywords=keywords, location=location, max_results=max_results))
+
+    if api in ("themuse", "all"):
+        sources.append("themuse")
+        fetcher = TheMuseFetcher()
+        all_jobs.extend(fetcher.fetch_jobs(keywords=keywords, location=location, max_results=max_results))
+
+    if api in ("remoteok", "all"):
+        sources.append("remoteok")
+        fetcher = RemoteOKFetcher()
+        all_jobs.extend(fetcher.fetch_jobs(keywords=keywords, location=location, max_results=max_results))
+
+    total_found = len(all_jobs)
+
+    # Save to Supabase (dedupe by raw.url JSON key)
+    saved = 0
+    for job in all_jobs:
+        try:
+            url = job.get('url')
+            if not url:
+                continue
+            # Prefer JSON containment for reliability across PostgREST versions
+            existing = supabase_client.table('jobs').select('id').contains('raw', {'url': url}).execute()
+            if existing.data:
+                continue
+
+            job_data = {
+                'id': str(uuid.uuid4()),
+                'source': job.get('source', 'unknown'),
+                'title': job.get('title', 'Unknown'),
+                'company': job.get('company', 'Unknown'),
+                'location': job.get('location'),
+                'posted_at': job.get('posted_at'),
+                'raw': {
+                    'url': url,
+                    'description': (job.get('description') or '')[:1000],
+                    'requirements': job.get('requirements', []),
+                    'salary': job.get('salary'),
+                    'job_type': job.get('job_type'),
+                    'fetched_at': datetime.now(timezone.utc).isoformat()
+                }
+            }
+            resp = supabase_client.table('jobs').insert(job_data).execute()
+            if resp.data:
+                saved += 1
+        except Exception as save_err:
+            logger.error("Failed to save job: %s", save_err)
+
+    return ScrapeJobsResponse(
+        message=f"Fetched {total_found} jobs, saved {saved} new",
+        total_found=total_found,
+        saved=saved,
+        sources=sources,
+    )
+
+@app.get("/user/{user_id}/applications")
+async def get_user_applications(user_id: str):
+    """
+    Get all applications for a user with their current status.
+    
+    Returns applications grouped by status (pending, applied, failed, etc.)
+    """
+    try:
+        # Get all applications for the user (no need to validate user exists - auth handles that)
+        applications_response = supabase_client.table('applications').select('*').eq('user_id', user_id).order('created_at', desc=True).execute()
+        
+        applications = applications_response.data or []
+        
+        # Group applications by status
+        status_groups = {
+            'pending': [],
+            'applied': [],
+            'failed': [],
+            'skipped': []
+        }
+        
+        for app in applications:
+            status = app.get('status', 'pending')
+            if status in status_groups:
+                status_groups[status].append(app)
+            else:
+                # Add any other status to a general category
+                if status not in status_groups:
+                    status_groups[status] = []
+                status_groups[status].append(app)
+        
+        return {
+            "applications": applications,
+            "status_groups": status_groups,
+            "total": len(applications)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching user applications: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch applications: {str(e)}")
+
+
+@app.get("/applications/{application_id}")
+async def get_application_details(application_id: str):
+    """
+    Get detailed information about a specific application.
+    """
+    try:
+        response = supabase_client.table('applications').select('*').eq('id', application_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Application not found")
+        
+        application = response.data[0]
+        
+        # Get job details if available
+        job_details = None
+        if application.get('job_id'):
+            job_response = supabase_client.table('jobs').select('*').eq('id', application['job_id']).execute()
+            if job_response.data:
+                job_details = job_response.data[0]
+        
+        return {
+            "application": application,
+            "job": job_details
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching application details: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch application details: {str(e)}")
+
+
+@app.get("/worker/status")
+async def get_worker_status():
+    """
+    Get current worker status and statistics.
+    """
+    try:
+        # Get application statistics
+        stats_response = supabase_client.table('applications').select('status').execute()
+        applications = stats_response.data or []
+        
+        # Count by status
+        status_counts = {}
+        for app in applications:
+            status = app.get('status', 'unknown')
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Get recent activity (last 10 applications)
+        recent_response = supabase_client.table('applications').select('*').order('created_at', desc=True).limit(10).execute()
+        recent_applications = recent_response.data or []
+        
+        return {
+            "status_counts": status_counts,
+            "recent_applications": recent_applications,
+            "worker_active": True,  # This could be enhanced to check if worker process is running
+            "last_updated": recent_applications[0].get('updated_at') if recent_applications else None
+        }
+        
+    except Exception as e:
+        logger.exception("Error fetching worker status: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch worker status: {str(e)}")
 
 
 @app.get("/")
