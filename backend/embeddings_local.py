@@ -255,16 +255,16 @@ class JobEmbeddingsGenerator:
             for i in range(0, len(jobs_with_embeddings), batch_size):
                 batch = jobs_with_embeddings[i:i + batch_size]
                 
-                # Prepare updates
+                # Prepare updates (only update the raw field with embeddings)
                 updates = []
                 for job in batch:
-                    updates.append({
-                        'id': job['id'],
+                    # Use PATCH to only update the raw field, not replace the entire row
+                    job_id = job['id']
+                    self.supabase_client.table('jobs').update({
                         'raw': job['raw']
-                    })
+                    }).eq('id', job_id).execute()
                 
-                # Update batch
-                response = self.supabase_client.table('jobs').upsert(updates).execute()
+                # No batch upsert needed since we're updating one at a time
                 updated_count += len(batch)
                 logger.info(f"Updated {updated_count}/{len(jobs_with_embeddings)} jobs")
             

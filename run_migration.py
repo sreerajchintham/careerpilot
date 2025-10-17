@@ -73,8 +73,8 @@ def check_supabase_config():
     print("\n🔍 Checking Supabase Configuration")
     print("=" * 40)
     
-    # Check for .env file
-    env_file = ".env"
+    # Check for .env file in backend directory
+    env_file = "backend/.env"
     required_vars = ["SUPABASE_URL", "SUPABASE_ANON_KEY"]
     found_vars = []
     
@@ -115,7 +115,7 @@ def test_backend_connection():
     
     try:
         import requests
-        response = requests.get("http://127.0.0.1:8001/health", timeout=5)
+        response = requests.get("http://127.0.0.1:8000/health", timeout=5)
         
         if response.status_code == 200:
             print("✅ Backend is running")
@@ -127,7 +127,7 @@ def test_backend_connection():
             
     except requests.exceptions.ConnectionError:
         print("❌ Backend is not running")
-        print("   Start the backend with: uvicorn app.main:app --reload --port 8001")
+        print("   Start the backend with: uvicorn app.main:app --reload --port 8000")
         return False
     except Exception as e:
         print(f"❌ Error testing backend: {e}")

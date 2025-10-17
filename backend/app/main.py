@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import uuid
 import io
 import re
@@ -13,6 +14,7 @@ import pdfplumber
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timezone
 
 # Configure basic logging to stdout. In production, prefer structured logging.
 logging.basicConfig(
@@ -21,21 +23,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("careerpilot.backend")
 
-# Optional OpenAI integration for embeddings
+# Gemini AI integration for embeddings
 try:
-    import openai
-    OPENAI_AVAILABLE = True
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
-    logger.warning("OpenAI not available. Will require embedding in request.")
+    GEMINI_AVAILABLE = False
+    logger.warning("Gemini AI not available. Will require embedding in request.")
 
-# Optional sentence-transformers for local embeddings
+# Optional PDF generation (for tailored resume export)
 try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
-    logger.warning("sentence-transformers not available. Will require embedding in request.")
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import inch
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
 
 # Optional Supabase integration
 try:
@@ -58,36 +61,29 @@ app = FastAPI(title="CareerPilot Agent API")
 supabase_client: Optional[Client] = None
 if SUPABASE_AVAILABLE:
     supabase_url = os.getenv('SUPABASE_URL')
-    supabase_key = os.getenv('SUPABASE_ANON_KEY')
+    # Use service role key for backend operations (bypasses RLS)
+    supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_ANON_KEY')
     if supabase_url and supabase_key:
         try:
             supabase_client = create_client(supabase_url, supabase_key)
-            logger.info("✅ Supabase client initialized for job matching")
+            if os.getenv('SUPABASE_SERVICE_ROLE_KEY'):
+                logger.info("✅ Supabase client initialized with service role key (full access)")
+            else:
+                logger.warning("⚠️  Supabase client initialized with anon key (limited by RLS). Set SUPABASE_SERVICE_ROLE_KEY for full access.")
         except Exception as e:
             logger.error(f"Failed to initialize Supabase client: {e}")
             supabase_client = None
 
-# Initialize OpenAI client if available
-openai_client = None
-if OPENAI_AVAILABLE and os.getenv('OPENAI_API_KEY'):
+# Initialize Gemini AI client if available
+gemini_configured = False
+if GEMINI_AVAILABLE and os.getenv('GEMINI_API_KEY'):
     try:
-        openai.api_key = os.getenv('OPENAI_API_KEY')
-        openai_client = openai
-        logger.info("✅ OpenAI client initialized for embeddings")
+        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+        gemini_configured = True
+        logger.info("✅ Gemini AI configured for embeddings")
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI client: {e}")
-        openai_client = None
-
-# Initialize sentence transformer model for local embeddings
-sentence_model = None
-if SENTENCE_TRANSFORMERS_AVAILABLE:
-    try:
-        # Use the same model as in embeddings_local.py
-        sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("✅ Sentence transformer model loaded for local embeddings")
-    except Exception as e:
-        logger.error(f"Failed to load sentence transformer model: {e}")
-        sentence_model = None
+        logger.error(f"Failed to configure Gemini AI: {e}")
+        gemini_configured = False
 
 
 # Pydantic models for request/response
@@ -113,9 +109,114 @@ class JobMatchResponse(BaseModel):
     user_skills: List[str]
 
 
-def simple_parse_resume(text: str) -> Dict[str, any]:
+def gemini_parse_resume(text: str) -> Dict[str, any]:
     """
-    Extract key information from resume text using regex heuristics.
+    Extract key information from resume text using Gemini AI for intelligent parsing.
+    
+    Uses Google's Gemini AI to understand context and extract:
+    - Name
+    - Email addresses
+    - Phone numbers
+    - Skills (technical and soft skills)
+    - Work experience summary
+    - Education summary
+    - Years of experience
+    - Job titles
+    
+    Falls back to regex-based parsing if Gemini AI is not configured.
+    
+    Returns structured data for further processing.
+    """
+    if not gemini_configured:
+        logger.warning("Gemini AI not configured, falling back to regex-based parsing")
+        return simple_parse_resume_regex(text)
+    
+    try:
+        # Truncate text if too long (Gemini has context limits)
+        max_length = 30000
+        if len(text) > max_length:
+            text = text[:max_length] + "\n... [truncated]"
+        
+        # Create the prompt for Gemini
+        prompt = f"""
+You are an expert resume parser. Extract the following information from this resume text and return it as a JSON object.
+
+Extract:
+1. name: The person's full name (string)
+2. email: Email address (string)
+3. phone: Phone number (string, format as digits only)
+4. skills: List of technical and professional skills (array of strings, limit to 30 most relevant skills)
+5. experience_years: Estimated years of professional experience (number)
+6. current_title: Most recent or current job title (string)
+7. education: Highest degree and field of study (string)
+8. location: City/State/Country if mentioned (string)
+9. summary: Brief 2-3 sentence professional summary (string)
+
+Return ONLY a valid JSON object with these exact keys. If a field is not found, use null for strings, 0 for numbers, or empty array for lists.
+
+Resume Text:
+{text}
+
+JSON Output:
+"""
+        
+        # Initialize Gemini model
+        model = genai.GenerativeModel('gemini-2.5-pro')
+        
+        # Generate response
+        response = model.generate_content(prompt)
+        
+        # Parse the JSON response
+        result_text = response.text.strip()
+        
+        # Remove markdown code blocks if present
+        if result_text.startswith('```'):
+            result_text = result_text.split('```')[1]
+            if result_text.startswith('json'):
+                result_text = result_text[4:]
+        
+        result_text = result_text.strip()
+        
+        # Parse JSON
+        parsed_data = json.loads(result_text)
+        
+        # Ensure all expected fields exist
+        default_result = {
+            "name": None,
+            "email": None,
+            "phone": None,
+            "skills": [],
+            "experience_years": 0,
+            "current_title": None,
+            "education": None,
+            "location": None,
+            "summary": None
+        }
+        
+        # Merge with defaults
+        for key in default_result:
+            if key not in parsed_data or parsed_data[key] is None:
+                parsed_data[key] = default_result[key]
+        
+        logger.info(f"Successfully parsed resume using Gemini AI. Found {len(parsed_data.get('skills', []))} skills")
+        
+        return parsed_data
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse Gemini response as JSON: {e}")
+        logger.warning("Falling back to regex-based parsing")
+        return simple_parse_resume_regex(text)
+    except Exception as e:
+        logger.error(f"Gemini AI parsing failed: {e}")
+        logger.warning("Falling back to regex-based parsing")
+        return simple_parse_resume_regex(text)
+
+
+def simple_parse_resume_regex(text: str) -> Dict[str, any]:
+    """
+    Fallback: Extract key information from resume text using regex heuristics.
+    
+    This is used when Gemini AI is not available or fails.
     
     Looks for:
     - Email addresses (standard email format)
@@ -128,57 +229,45 @@ def simple_parse_resume(text: str) -> Dict[str, any]:
         "name": None,
         "email": None,
         "phone": None,
-        "skills": []
+        "skills": [],
+        "experience_years": 0,
+        "current_title": None,
+        "education": None,
+        "location": None,
+        "summary": None
     }
     
     # Name extraction - look for common patterns at the beginning
-    # Usually the first line or first few lines contain the name
     lines = text.strip().split('\n')
     for i, line in enumerate(lines[:5]):  # Check first 5 lines
         line = line.strip()
         if line and len(line) < 50:  # Reasonable name length
-            # Skip common headers
             if not any(header in line.lower() for header in ['resume', 'cv', 'curriculum', 'contact', 'email', 'phone']):
-                # Check if it looks like a name (2-4 words, mostly letters)
                 words = line.split()
                 if 2 <= len(words) <= 4 and all(word.replace('.', '').replace('-', '').isalpha() for word in words):
                     result["name"] = line
                     break
     
-    # Email regex - looks for standard email format
+    # Email regex
     email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
     email_match = re.search(email_pattern, text)
     if email_match:
         result["email"] = email_match.group()
     
-    # Phone regex - looks for 10-digit US phone numbers with optional formatting
-    # Handles: (123) 456-7890, 123-456-7890, 123.456.7890, 1234567890
+    # Phone regex
     phone_pattern = r'\b(?:\(?(\d{3})\)?[-.\s]?)?(\d{3})[-.\s]?(\d{4})\b'
     phone_matches = re.findall(phone_pattern, text)
     if phone_matches:
-        # Take the first valid phone number found
         area, prefix, number = phone_matches[0]
-        if area:  # Full 10-digit number
+        if area:
             result["phone"] = f"{area}{prefix}{number}"
-        elif len(prefix) == 3 and len(number) == 4:  # 7-digit, might be incomplete
-            # Look for area code nearby
-            phone_context = text[max(0, text.find(phone_matches[0][1]) - 50):text.find(phone_matches[0][1]) + 50]
-            area_match = re.search(r'\b(\d{3})\b', phone_context)
-            if area_match:
-                result["phone"] = f"{area_match.group(1)}{prefix}{number}"
     
-    # Skills extraction - look for common skills section headers
-    # Collect ALL skills sections, not just the first one
+    # Skills extraction
     all_skills_text = []
-    
     skills_patterns = [
         r'Skills?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
         r'(?:Technical\s+)?Skills?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
         r'Core\s+Competencies?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Technologies?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Programming\s+Languages?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Expertise\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)',
-        r'Proficiencies?\s*:?\s*(.*?)(?=\n\n|\n[A-Z][a-z]|\n\d|\Z)'
     ]
     
     for pattern in skills_patterns:
@@ -189,103 +278,60 @@ def simple_parse_resume(text: str) -> Dict[str, any]:
                 all_skills_text.append(skills_section)
     
     if all_skills_text:
-        # Process each skills section found
         all_skills = []
         for skills_text in all_skills_text:
-            # Clean up the skills text first
-            skills_text = re.sub(r'\n\s*', ' ', skills_text)  # Replace newlines with spaces
-            skills_text = re.sub(r'\s+', ' ', skills_text)   # Normalize whitespace
-            
-            # Split skills by common delimiters and clean up
-            # Split skills by common delimiters, prioritizing commas and newlines
-            skills = []
-            
-            # First try comma separation (most common)
+            skills_text = re.sub(r'\s+', ' ', skills_text)
             if ',' in skills_text:
                 skills = [skill.strip() for skill in skills_text.split(',')]
-            # Then try newline separation
-            elif '\n' in skills_text:
-                skills = [skill.strip() for skill in skills_text.split('\n')]
-            # Then try other delimiters
             else:
-                for delimiter in [';', '|', '•', '·']:
-                    if delimiter in skills_text:
-                        skills = [skill.strip() for skill in skills_text.split(delimiter)]
-                        break
-            
-            # If we still have combined skills (like "React - AWS"), split by dashes too
-            if skills:
-                expanded_skills = []
-                for skill in skills:
-                    if ' - ' in skill or ' -' in skill or '- ' in skill:
-                        # Split by dashes and add each part
-                        parts = re.split(r'\s*-\s*', skill)
-                        expanded_skills.extend([part.strip() for part in parts if part.strip()])
-                    else:
-                        expanded_skills.append(skill)
-                skills = expanded_skills
-            
-            # If no delimiter found, try to split by multiple spaces or common patterns
-            if not skills:
                 skills = re.split(r'\s{2,}|\t+', skills_text)
             
-            # Clean up skills - remove empty strings and common prefixes
             for skill in skills:
                 skill = skill.strip()
-                if skill and len(skill) > 2:  # Skip single characters and very short strings
-                    # Remove common prefixes like "•", "-", "*", "●"
+                if skill and len(skill) > 2 and len(skill) < 50:
                     skill = re.sub(r'^[•●\-*\s]+', '', skill)
-                    # Remove trailing punctuation
                     skill = re.sub(r'[.,;:]+$', '', skill)
-                    # Skip if it's too long (likely not a skill) or contains common non-skill words
-                    if (len(skill) < 50 and 
-                        skill and 
-                        skill not in all_skills and
-                        not any(word in skill.lower() for word in ['experience', 'years', 'worked', 'developed', 'created', 'built'])):
+                    if skill and skill not in all_skills:
                         all_skills.append(skill)
         
-        result["skills"] = all_skills[:20]  # Limit to first 20 skills
+        result["skills"] = all_skills[:30]
     
     return result
 
 
-def compute_openai_embedding(text: str) -> List[float]:
+# Alias for backward compatibility
+simple_parse_resume = gemini_parse_resume
+
+
+def compute_gemini_embedding(text: str, task_type: str = "retrieval_query") -> List[float]:
     """
-    Compute embedding using OpenAI's text-embedding-ada-002 model.
+    Compute embedding using Gemini AI's text-embedding-004 model.
+    
+    Args:
+        text: Text to embed
+        task_type: Type of embedding task ("retrieval_query" for queries, "retrieval_document" for documents)
     
     Note: In production, consider using pgvector extension for PostgreSQL
     to store and query embeddings efficiently with cosine similarity.
     """
-    if not openai_client:
-        raise HTTPException(status_code=500, detail="OpenAI client not available")
+    if not gemini_configured:
+        raise HTTPException(status_code=500, detail="Gemini AI not configured")
     
     try:
-        response = openai_client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=text
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.error(f"Failed to compute OpenAI embedding: {e}")
-        raise HTTPException(status_code=500, detail="Failed to compute embedding")
-
-
-def compute_local_embedding(text: str) -> List[float]:
-    """Compute embedding using local sentence-transformers model"""
-    if not sentence_model:
-        raise HTTPException(status_code=500, detail="Sentence transformer model not available")
-    
-    try:
-        # Truncate text to reasonable length for embedding
-        max_length = 512  # Most models have token limits
+        # Truncate text to reasonable length
+        max_length = 2000  # Gemini can handle longer texts
         if len(text) > max_length:
             text = text[:max_length]
         
-        embedding = sentence_model.encode(text, convert_to_tensor=False)
-        return embedding.tolist()
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text,
+            task_type=task_type
+        )
+        return result['embedding']
     except Exception as e:
-        logger.error(f"Failed to compute local embedding: {e}")
-        raise HTTPException(status_code=500, detail="Failed to compute local embedding")
+        logger.error(f"Failed to compute Gemini embedding: {e}")
+        raise HTTPException(status_code=500, detail="Failed to compute embedding")
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -473,17 +519,28 @@ async def upload_resume(file: UploadFile = File(...)):
 @app.post("/parse-resume")
 async def parse_resume(file: UploadFile = File(...)):
     """
-    Extracts text from uploaded PDF using pdfplumber.
+    Extracts text from uploaded PDF using pdfplumber and parses it using Gemini AI.
+    
+    This endpoint:
+    1. Extracts text from PDF using pdfplumber
+    2. Parses the text using Gemini AI for intelligent extraction
+    3. Falls back to regex parsing if Gemini AI is unavailable
+    
+    Returns:
+    - text: Full extracted resume text
+    - parsed: Structured data including:
+      - name, email, phone
+      - skills (up to 30)
+      - experience_years
+      - current_title
+      - education
+      - location
+      - summary (AI-generated)
     
     Common PDF extraction challenges:
     - Multi-column layouts: pdfplumber handles these better than basic text extraction
     - Scanned PDFs: These are images and need OCR (not implemented here)
-    - Tables: pdfplumber can extract table data, but we're focusing on text
-    - Images with text: Won't extract text from images
-    - Complex formatting: May lose some formatting but preserves text content
     - Password-protected PDFs: Will fail unless password is provided
-    
-    Returns first 20,000 characters to avoid overwhelming responses.
     """
     try:
         # Read the uploaded file content
@@ -522,8 +579,71 @@ async def parse_resume(file: UploadFile = File(...)):
                 
                 if extracted_text.strip():
                     logger.info("Successfully extracted %d characters from PDF", len(extracted_text))
-                    # Parse the extracted text for structured data
+                    # Parse the extracted text using Gemini AI (or fallback to regex)
                     parsed_data = simple_parse_resume(extracted_text.strip())
+                    logger.info(f"✅ Resume parsed successfully. Extracted {len(parsed_data.get('skills', []))} skills")
+                    
+                    # Persist resume and update user profile
+                    if supabase_client:
+                        try:
+                            parsed_email = parsed_data.get('email')
+                            resume_user_id = None
+                            
+                            if parsed_email:
+                                # Check if user exists by email
+                                existing_user = supabase_client.table('users').select('id').eq('email', parsed_email).limit(1).execute()
+                                
+                                if not existing_user.data:
+                                    # Create user with parsed profile
+                                    new_user_id = str(uuid.uuid4())
+                                    supabase_client.table('users').insert({
+                                        'id': new_user_id,
+                                        'email': parsed_email,
+                                        'profile': parsed_data
+                                    }).execute()
+                                    resume_user_id = new_user_id
+                                    logger.info(f"Created new user {new_user_id} with email {parsed_email}")
+                                else:
+                                    resume_user_id = existing_user.data[0]['id']
+                                    # Update existing user profile
+                                    supabase_client.table('users').update({
+                                        'profile': parsed_data
+                                    }).eq('id', resume_user_id).execute()
+                                    logger.info(f"Updated profile for user {resume_user_id}")
+                            
+                            # Insert resume row
+                            if resume_user_id:
+                                # Compute embedding for resume text
+                                resume_embedding = None
+                                if gemini_configured:
+                                    try:
+                                        resume_embedding = compute_gemini_embedding(
+                                            extracted_text.strip()[:2000],  # Use first 2000 chars
+                                            task_type="retrieval_document"
+                                        )
+                                        logger.info(f"Computed resume embedding ({len(resume_embedding)} dims)")
+                                    except Exception as embed_err:
+                                        logger.warning(f"Failed to compute resume embedding: {embed_err}")
+                                
+                                resume_payload = {
+                                    'user_id': resume_user_id,
+                                    'original_url': None,  # TODO: upload to storage
+                                    'text': extracted_text.strip(),
+                                    'html_preview': None,  # TODO: generate HTML preview
+                                    'parsed': parsed_data,
+                                    'is_current': True
+                                }
+                                
+                                # Add embedding to parsed data for easy access
+                                if resume_embedding:
+                                    parsed_data_with_embed = {**parsed_data, 'embedding': resume_embedding}
+                                    resume_payload['parsed'] = parsed_data_with_embed
+                                
+                                supabase_client.table('resumes').insert(resume_payload).execute()
+                                logger.info(f"Saved resume for user {resume_user_id}")
+                        except Exception as persist_err:
+                            logger.warning(f"Resume persistence warning: {persist_err}")
+                    
                     return {
                         "text": extracted_text.strip(),
                         "parsed": parsed_data
@@ -532,7 +652,17 @@ async def parse_resume(file: UploadFile = File(...)):
                     logger.warning("No text could be extracted from PDF - may be scanned/image-based")
                     return {
                         "text": "",
-                        "parsed": {"name": None, "email": None, "phone": None, "skills": []},
+                        "parsed": {
+                            "name": None,
+                            "email": None,
+                            "phone": None,
+                            "skills": [],
+                            "experience_years": 0,
+                            "current_title": None,
+                            "education": None,
+                            "location": None,
+                            "summary": None
+                        },
                         "error": "No text found in PDF. This may be a scanned document or image-based PDF that requires OCR."
                     }
                     
@@ -553,7 +683,17 @@ async def parse_resume(file: UploadFile = File(...)):
             
             return {
                 "text": "",
-                "parsed": {"name": None, "email": None, "phone": None, "skills": []},
+                "parsed": {
+                    "name": None,
+                    "email": None,
+                    "phone": None,
+                    "skills": [],
+                    "experience_years": 0,
+                    "current_title": None,
+                    "education": None,
+                    "location": None,
+                    "summary": None
+                },
                 "error": f"Failed to parse PDF: {str(pdf_error)}. This may be a corrupted file or unsupported format."
             }
             
@@ -599,18 +739,14 @@ async def match_jobs(request: JobMatchRequest):
             # Use provided embedding
             resume_embedding = request.embedding
             logger.info("Using provided embedding for job matching")
-        elif openai_client:
-            # Compute embedding using OpenAI
-            resume_embedding = compute_openai_embedding(request.text)
-            logger.info("Computed OpenAI embedding for job matching")
-        elif sentence_model:
-            # Compute embedding using local sentence-transformers model
-            resume_embedding = compute_local_embedding(request.text)
-            logger.info("Computed local embedding for job matching")
+        elif gemini_configured:
+            # Compute embedding using Gemini AI (use retrieval_query for resume queries)
+            resume_embedding = compute_gemini_embedding(request.text, task_type="retrieval_query")
+            logger.info("Computed Gemini AI embedding for job matching")
         else:
             raise HTTPException(
                 status_code=400, 
-                detail="No embedding provided and no embedding service available. Please provide 'embedding' field in request or configure OpenAI/sentence-transformers."
+                detail="No embedding provided and Gemini AI not configured. Please provide 'embedding' field in request or configure GEMINI_API_KEY."
             )
         
         # Step 3: Query jobs with embeddings from Supabase
@@ -701,16 +837,16 @@ class ResumeEditResponse(BaseModel):
 
 def get_ai_resume_suggestions(resume_text: str, job_description: str, job_requirements: List[str], job_title: str, company: str) -> List[SuggestionItem]:
     """
-    Generate AI-powered resume suggestions using OpenAI GPT.
+    Generate AI-powered resume suggestions using Gemini AI.
     
     IMPORTANT: User must approve any edits before applying them to their resume.
     This function only provides suggestions - it does not modify the user's resume.
     """
-    if not openai_client:
-        raise HTTPException(status_code=500, detail="OpenAI client not available for AI suggestions")
+    if not gemini_configured:
+        raise HTTPException(status_code=500, detail="Gemini AI not configured for AI suggestions")
     
     try:
-        # Prepare the prompt for OpenAI
+        # Prepare the prompt for Gemini
         requirements_text = "\n".join(f"- {req}" for req in job_requirements) if job_requirements else "Not specified"
         
         prompt = f"""
@@ -758,18 +894,11 @@ Use confidence levels:
 IMPORTANT: Only suggest things that are truthful and can be verified from the resume content.
 """
 
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a professional resume consultant. Always be truthful and never suggest fake experience."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=800,
-            temperature=0.3  # Lower temperature for more consistent, factual responses
-        )
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(prompt)
         
         # Parse the AI response
-        ai_response = response.choices[0].message.content.strip()
+        ai_response = response.text.strip()
         
         # Try to parse as JSON
         try:
@@ -819,8 +948,8 @@ async def propose_resume_edits(request: ResumeEditRequest):
     applying them to their resume. This endpoint does not modify the user's resume.
     
     Behavior:
-    - If OPENAI_API_KEY is set: Uses AI to generate up to 6 personalized suggestions
-    - If no OpenAI key: Falls back to heuristic analysis of missing skills
+    - If GEMINI_API_KEY is set: Uses Gemini AI to generate up to 6 personalized suggestions
+    - If no Gemini key: Falls back to heuristic analysis of missing skills
     - All suggestions are framed as "Add or emphasize: [recommendation]"
     - AI suggestions are truthful and don't invent experience
     """
@@ -852,10 +981,10 @@ async def propose_resume_edits(request: ResumeEditRequest):
         
         suggestions = []
         
-        # Try AI-powered suggestions first (if OpenAI is available)
-        if openai_client:
+        # Try AI-powered suggestions first (if Gemini is available)
+        if gemini_configured:
             try:
-                logger.info(f"Using AI to generate resume suggestions for job {request.job_id}")
+                logger.info(f"Using Gemini AI to generate resume suggestions for job {request.job_id}")
                 ai_suggestions = get_ai_resume_suggestions(
                     request.resume_text, 
                     job_description, 
@@ -937,17 +1066,17 @@ async def propose_resume_edits(request: ResumeEditRequest):
 class AppliedSuggestion(BaseModel):
     text: str
     confidence: str
-    applied_text: str
+    applied_text: Optional[str] = None
 
 class JobContext(BaseModel):
-    job_title: str
-    company: str
+    job_title: Optional[str] = ""
+    company: Optional[str] = ""
 
 class SaveResumeDraftRequest(BaseModel):
     user_id: str
     resume_text: str
-    applied_suggestions: List[AppliedSuggestion]
-    job_context: JobContext
+    applied_suggestions: List[AppliedSuggestion] = []
+    job_context: Optional[JobContext] = None
 
 class SaveResumeDraftResponse(BaseModel):
     draft_id: str
@@ -967,6 +1096,9 @@ async def save_resume_draft(request: SaveResumeDraftRequest):
     IMPORTANT: This creates a new version, it doesn't modify the original resume.
     """
     try:
+        logger.info(f"Received save draft request for user: {request.user_id}")
+        logger.info(f"Applied suggestions count: {len(request.applied_suggestions)}")
+        
         # Generate a unique draft ID
         draft_id = str(uuid.uuid4())
         
@@ -984,8 +1116,8 @@ async def save_resume_draft(request: SaveResumeDraftRequest):
                 for suggestion in request.applied_suggestions
             ],
             "job_context": {
-                "job_title": request.job_context.job_title,
-                "company": request.job_context.company
+                "job_title": request.job_context.job_title if request.job_context else "",
+                "company": request.job_context.company if request.job_context else ""
             },
             "created_at": "now()",  # Will be set by database
             "word_count": len(request.resume_text.split()),
@@ -998,7 +1130,10 @@ async def save_resume_draft(request: SaveResumeDraftRequest):
         
         logger.info(f"Saving resume draft {draft_id} for user {request.user_id}")
         logger.info(f"Draft contains {len(request.applied_suggestions)} applied suggestions")
-        logger.info(f"Target job: {request.job_context.job_title} at {request.job_context.company}")
+        if request.job_context:
+            logger.info(f"Target job: {request.job_context.job_title} at {request.job_context.company}")
+        else:
+            logger.info("No job context provided")
         
         try:
             # Validate user_id format first
@@ -1021,30 +1156,46 @@ async def save_resume_draft(request: SaveResumeDraftRequest):
                 }
                 supabase_client.table('users').insert(new_user).execute()
             
-            # Call the add_user_draft function
-            # Note: We need to use RPC call since we're using a custom function
-            rpc_response = supabase_client.rpc(
-                'add_user_draft',
-                {
-                    'p_user_id': request.user_id,
-                    'p_draft_id': draft_id,
-                    'p_resume_text': request.resume_text,
-                    'p_applied_suggestions': [
-                        {
-                            'text': suggestion.text,
-                            'confidence': suggestion.confidence,
-                            'applied_text': suggestion.applied_text
+            # Try using RPC function first (if migration 002 was applied)
+            try:
+                supabase_client.rpc(
+                    'add_user_draft',
+                    {
+                        'p_user_id': request.user_id,
+                        'p_draft_id': draft_id,
+                        'p_resume_text': request.resume_text,
+                        'p_applied_suggestions': [
+                            {
+                                'text': suggestion.text,
+                                'confidence': suggestion.confidence,
+                                'applied_text': suggestion.applied_text
+                            }
+                            for suggestion in request.applied_suggestions
+                        ],
+                        'p_job_context': {
+                            'job_title': request.job_context.job_title if request.job_context else "",
+                            'company': request.job_context.company if request.job_context else ""
                         }
-                        for suggestion in request.applied_suggestions
-                    ],
-                    'p_job_context': {
-                        'job_title': request.job_context.job_title,
-                        'company': request.job_context.company
                     }
-                }
-            ).execute()
-            
-            logger.info(f"Successfully saved resume draft {draft_id} to Supabase")
+                ).execute()
+                logger.info(f"Successfully saved resume draft {draft_id} using RPC function")
+            except Exception as rpc_error:
+                # Fallback to direct update if RPC function doesn't exist
+                logger.warning(f"RPC function not available, using direct update: {rpc_error}")
+                
+                # Get current drafts
+                user_data = supabase_client.table('users').select('drafts').eq('id', request.user_id).single().execute()
+                current_drafts = user_data.data.get('drafts', []) if user_data.data else []
+                
+                # Add new draft to the array
+                current_drafts.append(draft_data)
+                
+                # Update user's drafts
+                supabase_client.table('users').update({
+                    'drafts': current_drafts
+                }).eq('id', request.user_id).execute()
+                
+                logger.info(f"Successfully saved resume draft {draft_id} using direct update")
             
         except Exception as db_error:
             logger.error(f"Failed to save draft to database: {db_error}")
@@ -1094,22 +1245,33 @@ async def get_user_drafts(user_id: str):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid user_id format. Must be a valid UUID.")
         
-        # Get user's drafts using the custom function
-        rpc_response = supabase_client.rpc('get_user_drafts', {'p_user_id': user_id}).execute()
-        
-        if not rpc_response.data:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        drafts_data = rpc_response.data[0] if rpc_response.data else []
-        
-        # Convert to list if it's not already
-        if isinstance(drafts_data, str):
-            import json
-            drafts_data = json.loads(drafts_data)
-        elif not isinstance(drafts_data, list):
-            drafts_data = []
-        
-        logger.info(f"Retrieved {len(drafts_data)} drafts for user {user_id}")
+        # Try using RPC function first (if migration 002 was applied)
+        try:
+            rpc_response = supabase_client.rpc('get_user_drafts', {'p_user_id': user_id}).execute()
+            drafts_data = rpc_response.data if rpc_response.data else []
+            
+            # Convert to list if it's not already
+            if isinstance(drafts_data, str):
+                import json
+                drafts_data = json.loads(drafts_data)
+            elif not isinstance(drafts_data, list):
+                drafts_data = []
+            
+            logger.info(f"Retrieved {len(drafts_data)} drafts for user {user_id} using RPC")
+        except Exception as rpc_error:
+            # Fallback to direct query if RPC function doesn't exist
+            logger.warning(f"RPC function not available, using direct query: {rpc_error}")
+            
+            # Get user's drafts directly from the table
+            user_response = supabase_client.table('users').select('drafts').eq('id', user_id).execute()
+            
+            if not user_response.data:
+                logger.info(f"No user found with id {user_id}, returning empty drafts")
+                drafts_data = []
+            else:
+                drafts_data = user_response.data[0].get('drafts', []) if user_response.data else []
+            
+            logger.info(f"Retrieved {len(drafts_data)} drafts for user {user_id} using direct query")
         
         return GetUserDraftsResponse(
             user_id=user_id,
@@ -1187,6 +1349,299 @@ async def get_user_draft(user_id: str, draft_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to retrieve draft: {str(e)}")
 
 
+# Pydantic models for tailored resume generation
+class GenerateTailoredResumeRequest(BaseModel):
+    application_id: str
+    user_id: str
+
+
+class GenerateTailoredResumeResponse(BaseModel):
+    application_id: str
+    job_title: str
+    company: str
+    original_resume: str
+    tailored_resume: str
+    changes_made: List[str]
+    success: bool
+    message: str
+
+
+@app.post("/applications/{application_id}/generate-tailored-resume", response_model=GenerateTailoredResumeResponse)
+async def generate_tailored_resume(application_id: str, request: GenerateTailoredResumeRequest):
+    """
+    Generate a tailored resume for a specific job application using AI materials.
+    
+    This endpoint:
+    1. Fetches the application's AI-generated materials (match analysis, cover letter, recommendations)
+    2. Retrieves the user's original resume
+    3. Uses Gemini AI to create a new, tailored resume that:
+       - Preserves the original structure and truthfulness
+       - Emphasizes relevant skills and experience
+       - Adds keywords from job description
+       - Rewords bullet points to highlight matching qualifications
+    4. Returns both original and tailored versions for comparison
+    
+    IMPORTANT: The AI does NOT invent experience. It only reorganizes and emphasizes
+    existing qualifications to better match the job requirements.
+    """
+    try:
+        logger.info(f"Generating tailored resume for application {application_id}")
+        
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database connection not available")
+        
+        if not gemini_configured:
+            raise HTTPException(
+                status_code=503,
+                detail="AI service not available. Please configure GEMINI_API_KEY."
+            )
+        
+        # Validate application_id
+        try:
+            uuid.UUID(application_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid application_id format")
+        
+        # Fetch application with AI materials and job details
+        app_response = supabase_client.table('applications').select('''
+            *,
+            jobs!inner(
+                id,
+                title,
+                company,
+                location,
+                raw
+            )
+        ''').eq('id', application_id).eq('user_id', request.user_id).single().execute()
+        
+        if not app_response.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Application not found or does not belong to user"
+            )
+        
+        application = app_response.data
+        job_data = application['jobs']
+        
+        # Check if application has AI materials
+        if application['status'] != 'materials_ready' and application['status'] != 'not_viable':
+            raise HTTPException(
+                status_code=400,
+                detail="Application must have AI-generated materials (status: materials_ready)"
+            )
+        
+        artifacts = application.get('artifacts', {})
+        match_analysis = artifacts.get('match_analysis', {})
+        cover_letter = artifacts.get('cover_letter', '')
+        
+        if not match_analysis:
+            raise HTTPException(
+                status_code=400,
+                detail="No AI materials found for this application. Run the worker first."
+            )
+        
+        # Fetch user's original resume
+        resume_response = supabase_client.table('resumes').select('*').eq(
+            'user_id', request.user_id
+        ).order('created_at', desc=True).limit(1).execute()
+        
+        if not resume_response.data:
+            raise HTTPException(
+                status_code=404,
+                detail="No resume found for user. Please upload a resume first."
+            )
+        
+        original_resume = resume_response.data[0]['text']
+        
+        # Extract job description from raw data
+        job_description = job_data['raw'].get('description', 'No description available')
+        job_requirements = job_data['raw'].get('requirements', '')
+        
+        # Build Gemini prompt to create tailored resume
+        prompt = f"""You are an expert resume writer. Create a tailored version of the candidate's resume for this specific job.
+
+**CRITICAL RULES:**
+1. Do NOT invent or fabricate any experience, skills, or qualifications
+2. ONLY reorganize, emphasize, and reword EXISTING information
+3. Keep the same resume structure (sections, order)
+4. Add relevant keywords from the job description naturally
+5. Highlight experiences that match the job requirements
+6. Make sure all claims remain truthful to the original resume
+
+**Original Resume:**
+{original_resume}
+
+**Target Job:**
+Title: {job_data['title']}
+Company: {job_data['company']}
+Location: {job_data.get('location', 'Not specified')}
+
+Description:
+{job_description}
+
+{f"Requirements:\n{job_requirements}" if job_requirements else ""}
+
+**AI Match Analysis:**
+Match Score: {match_analysis.get('match_score', 'N/A')}/100
+Reasoning: {match_analysis.get('reasoning', 'N/A')}
+Key Strengths: {', '.join(match_analysis.get('key_strengths', []))}
+Areas to Address: {', '.join(match_analysis.get('areas_to_address', []))}
+Recommendations: {', '.join(match_analysis.get('recommendations', []))}
+
+**Task:**
+Create a tailored resume that:
+1. Emphasizes the "Key Strengths" identified in the match analysis
+2. Addresses the "Areas to Address" by highlighting relevant existing experience
+3. Incorporates keywords from the job description naturally
+4. Maintains the exact same factual accuracy as the original
+5. Is ready to copy-paste into a job application
+
+**Output Format:**
+Return ONLY the tailored resume text. Do not include any explanations, notes, or comments.
+The output should be a complete, polished resume ready for submission.
+"""
+        
+        # Call Gemini AI to generate tailored resume
+        try:
+            model = genai.GenerativeModel('gemini-2.5-pro')
+            response = model.generate_content(prompt)
+            tailored_resume = response.text.strip()
+            
+            # Extract key changes made (simple heuristic)
+            changes_made = []
+            
+            # Check if new keywords were added
+            job_keywords = set(re.findall(r'\b\w+\b', job_description.lower()))
+            original_keywords = set(re.findall(r'\b\w+\b', original_resume.lower()))
+            tailored_keywords = set(re.findall(r'\b\w+\b', tailored_resume.lower()))
+            
+            new_keywords = tailored_keywords - original_keywords
+            relevant_new_keywords = new_keywords & job_keywords
+            
+            if relevant_new_keywords:
+                changes_made.append(f"Added {len(relevant_new_keywords)} relevant keywords from job description")
+            
+            # Check for length difference
+            word_diff = len(tailored_resume.split()) - len(original_resume.split())
+            if abs(word_diff) > 10:
+                changes_made.append(f"{'Expanded' if word_diff > 0 else 'Condensed'} content ({abs(word_diff)} words)")
+            
+            # Check for emphasis on key strengths
+            for strength in match_analysis.get('key_strengths', []):
+                if strength.lower() in tailored_resume.lower() and strength.lower() not in original_resume.lower():
+                    changes_made.append(f"Emphasized: {strength}")
+            
+            if not changes_made:
+                changes_made = ["Reorganized and optimized existing content for better job match"]
+            
+            logger.info(f"Successfully generated tailored resume for application {application_id}")
+            
+            return GenerateTailoredResumeResponse(
+                application_id=application_id,
+                job_title=job_data['title'],
+                company=job_data['company'],
+                original_resume=original_resume,
+                tailored_resume=tailored_resume,
+                changes_made=changes_made,
+                success=True,
+                message="Tailored resume generated successfully"
+            )
+            
+        except Exception as ai_error:
+            logger.error(f"Gemini AI error: {ai_error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate tailored resume with AI: {str(ai_error)}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error generating tailored resume: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to generate tailored resume: {str(e)}")
+
+
+class ExportTailoredResumePDFRequest(BaseModel):
+    application_id: str
+    user_id: str
+    tailored_text: Optional[str] = None  # if provided, export this text; otherwise regenerate
+
+
+from fastapi.responses import StreamingResponse
+
+
+@app.post("/applications/{application_id}/export-tailored-resume-pdf")
+async def export_tailored_resume_pdf(application_id: str, request: ExportTailoredResumePDFRequest):
+    """
+    Export the tailored resume to a PDF. If `tailored_text` is provided, it will be used.
+    Otherwise, this endpoint will regenerate the tailored resume text first.
+
+    Note: Preserving original PDF fonts/layout exactly is non-trivial without the source template.
+    This version outputs a clean, ATS-friendly PDF using a readable font. For exact formatting
+    preservation, we would need the original DOCX/template and a templating engine.
+    """
+    try:
+        if not REPORTLAB_AVAILABLE:
+            raise HTTPException(status_code=501, detail="PDF export not available on server (reportlab not installed)")
+
+        # Acquire tailored resume text
+        tailored_text = request.tailored_text
+        if not tailored_text:
+            # Call our existing generator to get tailored text
+            gen_req = GenerateTailoredResumeRequest(application_id=application_id, user_id=request.user_id)
+            gen_resp = await generate_tailored_resume(application_id, gen_req)  # type: ignore
+            tailored_text = gen_resp.tailored_resume
+
+        # Create PDF in-memory
+        pdf_buffer = io.BytesIO()
+        c = canvas.Canvas(pdf_buffer, pagesize=LETTER)
+        width, height = LETTER
+
+        # Basic margins
+        x_margin = 1 * inch
+        y_margin = 1 * inch
+        max_width = width - 2 * x_margin
+
+        # Heading
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(x_margin, height - y_margin, "Tailored Resume")
+
+        # Body text (simple wrapping)
+        c.setFont("Helvetica", 10)
+        text_object = c.beginText()
+        text_object.setTextOrigin(x_margin, height - y_margin - 20)
+        text_object.setLeading(14)
+
+        # Wrap lines manually
+        import textwrap
+        for paragraph in tailored_text.split("\n\n"):
+            for line in textwrap.wrap(paragraph, width=100):
+                if text_object.getY() <= y_margin:
+                    c.drawText(text_object)
+                    c.showPage()
+                    c.setFont("Helvetica", 10)
+                    text_object = c.beginText()
+                    text_object.setTextOrigin(x_margin, height - y_margin)
+                    text_object.setLeading(14)
+                text_object.textLine(line)
+            text_object.textLine("")  # paragraph spacing
+
+        c.drawText(text_object)
+        c.showPage()
+        c.save()
+
+        pdf_buffer.seek(0)
+        filename = f"tailored_resume_{application_id}.pdf"
+        return StreamingResponse(pdf_buffer, media_type="application/pdf", headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error exporting tailored resume PDF: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to export PDF: {str(e)}")
+
 @app.delete("/user/{user_id}/draft/{draft_id}")
 async def delete_user_draft(user_id: str, draft_id: str):
     """
@@ -1249,6 +1704,21 @@ class QueueApplicationsResponse(BaseModel):
     applications: List[QueuedApplication]
 
 
+# API Job Scraper models
+class ScrapeJobsRequest(BaseModel):
+    api: str = "all"  # 'adzuna' | 'themuse' | 'remoteok' | 'all'
+    keywords: str
+    location: str = "Remote"
+    max_results: int = 50
+
+
+class ScrapeJobsResponse(BaseModel):
+    message: str
+    total_found: int
+    saved: int
+    sources: List[str]
+
+
 @app.post("/queue-applications", response_model=QueueApplicationsResponse)
 async def queue_applications(request: QueueApplicationsRequest):
     """
@@ -1283,18 +1753,74 @@ async def queue_applications(request: QueueApplicationsRequest):
         
         logger.info(f"Queueing {len(request.job_ids)} applications for user {request.user_id}")
         
-        # Check if user exists
-        user_response = supabase_client.table('users').select('id').eq('id', request.user_id).execute()
-        if not user_response.data:
-            raise HTTPException(status_code=404, detail="User not found")
+        # Ensure user exists in users table (auto-create if needed for foreign key constraint)
+        try:
+            user_check = supabase_client.table('users').select('id').eq('id', request.user_id).execute()
+            if not user_check.data:
+                # User doesn't exist, create them with email from Supabase Auth (service role required)
+                logger.info(f"Auto-creating user record for {request.user_id}")
+
+                user_email: Optional[str] = None
+                try:
+                    # Attempt to fetch the auth user to get a verified email
+                    auth_user_resp = supabase_client.auth.admin.get_user_by_id(request.user_id)
+                    if getattr(auth_user_resp, 'user', None) is not None:
+                        user_email = getattr(auth_user_resp.user, 'email', None)
+                except Exception as auth_err:
+                    logger.warning(f"Could not fetch auth user for {request.user_id}: {auth_err}")
+
+                if not user_email:
+                    # Fallback placeholder to satisfy NOT NULL; can be updated later by profile flow
+                    user_email = f"{request.user_id}@placeholder.local"
+
+                user_data = {
+                    'id': request.user_id,
+                    'email': user_email,
+                    'profile': {}
+                }
+                supabase_client.table('users').insert(user_data).execute()
+                logger.info(f"✅ Created user record for {request.user_id} with email {user_email}")
+        except Exception as e:
+            logger.warning(f"Could not ensure user exists: {e}. Continuing anyway...")
         
-        # Check if all jobs exist and get their details
+        # Check if all jobs exist, get their details, and validate they have URLs
         job_details = {}
+        jobs_without_urls = []
+        
         for job_id in request.job_ids:
-            job_response = supabase_client.table('jobs').select('id, title, company').eq('id', job_id).execute()
+            job_response = supabase_client.table('jobs').select('id, title, company, raw').eq('id', job_id).execute()
             if not job_response.data:
                 raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-            job_details[job_id] = job_response.data[0]
+            
+            job = job_response.data[0]
+            
+            # CRITICAL: Validate job has a valid application URL
+            job_url = job.get('raw', {}).get('url')
+            if not job_url or not isinstance(job_url, str) or not job_url.strip():
+                jobs_without_urls.append({
+                    'job_id': job_id,
+                    'title': job.get('title', 'Unknown'),
+                    'company': job.get('company', 'Unknown')
+                })
+                logger.warning(f"⚠️  Job {job_id} ({job.get('title')}) has no application URL")
+                continue
+            
+            job_details[job_id] = job
+        
+        # If any jobs don't have URLs, return error with details
+        if jobs_without_urls:
+            error_msg = "Some selected jobs don't have application URLs and cannot be queued:\n"
+            for job in jobs_without_urls:
+                error_msg += f"- {job['title']} at {job['company']}\n"
+            error_msg += "\nPlease deselect these jobs or contact support."
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    "message": "Jobs without application URLs cannot be queued",
+                    "jobs_without_urls": jobs_without_urls,
+                    "error": error_msg
+                }
+            )
         
         # Check for existing applications to avoid duplicates
         existing_apps_response = supabase_client.table('applications').select('job_id').eq('user_id', request.user_id).in_('job_id', request.job_ids).execute()
@@ -1318,7 +1844,7 @@ async def queue_applications(request: QueueApplicationsRequest):
                 'id': application_id,
                 'user_id': request.user_id,
                 'job_id': job_id,
-                'status': 'draft',  # Use 'draft' instead of 'pending' to match database constraint
+                'status': 'draft',  # Use a valid status per schema; worker should process 'draft'
                 'artifacts': {},
                 'attempt_meta': {
                     'queued_at': 'now()',
@@ -1336,7 +1862,7 @@ async def queue_applications(request: QueueApplicationsRequest):
                 job_id=job_id,
                 job_title=job_info['title'],
                 company=job_info['company'],
-                status='draft',  # Match the database constraint
+                status='draft',
                 queued_at='now()'
             ))
         
@@ -1366,6 +1892,988 @@ async def queue_applications(request: QueueApplicationsRequest):
     except Exception as e:
         logger.exception("Error queueing applications: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Failed to queue applications: {str(e)}")
+
+
+@app.post("/scrape-jobs", response_model=ScrapeJobsResponse)
+async def scrape_jobs(request: ScrapeJobsRequest):
+    """
+    Trigger API-based job fetching and save results to the database.
+    """
+    try:
+        # Import locally so that server can boot even if workers deps missing
+        from workers.api_job_fetcher import AdzunaFetcher, TheMuseFetcher, RemoteOKFetcher
+    except Exception as imp_err:
+        raise HTTPException(status_code=500, detail=f"Job fetchers not available: {imp_err}")
+
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Supabase client not available")
+
+    sources: List[str] = []
+    all_jobs: List[Dict[str, Any]] = []
+
+    api = (request.api or "all").lower()
+    keywords = request.keywords
+    location = request.location or "Remote"
+    max_results = max(1, min(request.max_results or 50, 100))
+
+    # Collect jobs
+    if api in ("adzuna", "all"):
+        sources.append("adzuna")
+        fetcher = AdzunaFetcher()
+        all_jobs.extend(fetcher.fetch_jobs(keywords=keywords, location=location, max_results=max_results))
+
+    if api in ("themuse", "all"):
+        sources.append("themuse")
+        fetcher = TheMuseFetcher()
+        all_jobs.extend(fetcher.fetch_jobs(keywords=keywords, location=location, max_results=max_results))
+
+    if api in ("remoteok", "all"):
+        sources.append("remoteok")
+        fetcher = RemoteOKFetcher()
+        all_jobs.extend(fetcher.fetch_jobs(keywords=keywords, location=location, max_results=max_results))
+
+    total_found = len(all_jobs)
+
+    # Save to Supabase (dedupe by raw.url JSON key)
+    saved = 0
+    for job in all_jobs:
+        try:
+            url = job.get('url')
+            if not url:
+                continue
+            # Prefer JSON containment for reliability across PostgREST versions
+            existing = supabase_client.table('jobs').select('id').contains('raw', {'url': url}).execute()
+            if existing.data:
+                continue
+
+            # Compute embedding for job description
+            job_embedding = None
+            job_description = job.get('description', '')
+            if gemini_configured and job_description:
+                try:
+                    # Use first 2000 chars of description for embedding
+                    embed_text = f"{job.get('title', '')} {job.get('company', '')} {job_description}"[:2000]
+                    job_embedding = compute_gemini_embedding(
+                        embed_text,
+                        task_type="retrieval_document"
+                    )
+                    logger.debug(f"Computed job embedding for {job.get('title')}")
+                except Exception as embed_err:
+                    logger.warning(f"Failed to compute job embedding: {embed_err}")
+            
+            job_data = {
+                'id': str(uuid.uuid4()),
+                'source': job.get('source', 'unknown'),
+                'title': job.get('title', 'Unknown'),
+                'company': job.get('company', 'Unknown'),
+                'location': job.get('location'),
+                'posted_at': job.get('posted_at'),
+                'raw': {
+                    'url': url,
+                    'description': (job.get('description') or '')[:1000],
+                    'requirements': job.get('requirements', []),
+                    'salary': job.get('salary'),
+                    'job_type': job.get('job_type'),
+                    'fetched_at': datetime.now(timezone.utc).isoformat(),
+                    'embedding': job_embedding  # Store embedding in raw JSONB
+                }
+            }
+            resp = supabase_client.table('jobs').insert(job_data).execute()
+            if resp.data:
+                saved += 1
+        except Exception as save_err:
+            logger.error("Failed to save job: %s", save_err)
+
+    return ScrapeJobsResponse(
+        message=f"Fetched {total_found} jobs, saved {saved} new",
+        total_found=total_found,
+        saved=saved,
+        sources=sources,
+    )
+
+@app.get("/user/{user_id}/applications")
+async def get_user_applications(user_id: str):
+    """
+    Get all applications for a user with their current status.
+    
+    Returns applications grouped by status (pending, applied, failed, etc.)
+    """
+    try:
+        # Get all applications for the user with job details
+        applications_response = supabase_client.table('applications').select('''
+            *,
+            jobs!inner(
+                id,
+                title,
+                company,
+                location,
+                source,
+                raw
+            )
+        ''').eq('user_id', user_id).order('created_at', desc=True).execute()
+        
+        applications = applications_response.data or []
+        
+        # Group applications by status
+        status_groups = {
+            'pending': [],
+            'applied': [],
+            'failed': [],
+            'skipped': []
+        }
+        
+        for app in applications:
+            status = app.get('status', 'pending')
+            if status in status_groups:
+                status_groups[status].append(app)
+            else:
+                # Add any other status to a general category
+                if status not in status_groups:
+                    status_groups[status] = []
+                status_groups[status].append(app)
+        
+        return {
+            "applications": applications,
+            "status_groups": status_groups,
+            "total": len(applications)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching user applications: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch applications: {str(e)}")
+
+
+@app.get("/applications/{application_id}")
+async def get_application_details(application_id: str):
+    """
+    Get detailed information about a specific application.
+    """
+    try:
+        response = supabase_client.table('applications').select('*').eq('id', application_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Application not found")
+        
+        application = response.data[0]
+        
+        # Get job details if available
+        job_details = None
+        if application.get('job_id'):
+            job_response = supabase_client.table('jobs').select('*').eq('id', application['job_id']).execute()
+            if job_response.data:
+                job_details = job_response.data[0]
+        
+        return {
+            "application": application,
+            "job": job_details
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching application details: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch application details: {str(e)}")
+
+
+@app.post("/applications/{application_id}/mark-manual-submitted")
+async def mark_application_as_manually_submitted(application_id: str):
+    """
+    Mark an application as manually submitted by the user.
+    
+    This is used when the user manually applies to a job using the AI-generated
+    materials (cover letter, match analysis, etc.) but submits the application
+    themselves rather than using automation.
+    
+    The application status will be changed from 'materials_ready' to 'submitted',
+    and metadata will indicate it was a manual submission.
+    """
+    try:
+        # Validate application exists
+        app_response = supabase_client.table('applications').select('id, status, attempt_meta').eq('id', application_id).execute()
+        
+        if not app_response.data:
+            raise HTTPException(status_code=404, detail="Application not found")
+        
+        application = app_response.data[0]
+        
+        # Only allow marking as manually submitted if status is 'materials_ready'
+        if application['status'] != 'materials_ready':
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Application must be in 'materials_ready' status to mark as manually submitted. Current status: {application['status']}"
+            )
+        
+        # Update application status and metadata
+        current_meta = application.get('attempt_meta', {}) or {}
+        updated_meta = {
+            **current_meta,
+            'manually_submitted_at': datetime.now(timezone.utc).isoformat(),
+            'submission_method': 'manual',
+            'note': 'User manually submitted application using AI-generated materials'
+        }
+        
+        update_response = supabase_client.table('applications').update({
+            'status': 'submitted',
+            'attempt_meta': updated_meta,
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }).eq('id', application_id).execute()
+        
+        if not update_response.data:
+            raise HTTPException(status_code=500, detail="Failed to update application status")
+        
+        logger.info(f"✅ Application {application_id} marked as manually submitted")
+        
+        return {
+            "message": "Application marked as manually submitted",
+            "application_id": application_id,
+            "status": "submitted",
+            "submission_method": "manual"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error marking application as manually submitted: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to mark application: {str(e)}")
+
+
+@app.get("/worker/status")
+async def get_worker_status():
+    """
+    Get current worker status and statistics.
+    """
+    try:
+        # Get application statistics
+        stats_response = supabase_client.table('applications').select('status').execute()
+        applications = stats_response.data or []
+        
+        # Count by status
+        status_counts = {}
+        for app in applications:
+            status = app.get('status', 'unknown')
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Get recent activity (last 10 applications)
+        recent_response = supabase_client.table('applications').select('*').order('created_at', desc=True).limit(10).execute()
+        recent_applications = recent_response.data or []
+        
+        return {
+            "status_counts": status_counts,
+            "recent_applications": recent_applications,
+            "worker_active": True,  # This could be enhanced to check if worker process is running
+            "last_updated": recent_applications[0].get('updated_at') if recent_applications else None
+        }
+        
+    except Exception as e:
+        logger.exception("Error fetching worker status: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch worker status: {str(e)}")
+
+
+@app.get("/user/{user_id}/job-matches")
+async def get_user_job_matches(user_id: str, top_n: int = 10):
+    """
+    Get top matching jobs for a user based on their resume embedding.
+    Computes cosine similarity between user's resume and all job embeddings.
+    """
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Supabase client not available")
+    
+    try:
+        # Get user's latest resume with embedding
+        resume_response = supabase_client.table('resumes').select('parsed').eq('user_id', user_id).eq('is_current', True).order('created_at', desc=True).limit(1).execute()
+        
+        if not resume_response.data or not resume_response.data[0].get('parsed'):
+            return {"matches": [], "message": "No resume found for user"}
+        
+        resume_embedding = resume_response.data[0]['parsed'].get('embedding')
+        if not resume_embedding:
+            return {"matches": [], "message": "Resume has no embedding. Please re-upload your resume."}
+        
+        # Get all jobs with embeddings
+        jobs_response = supabase_client.table('jobs').select('*').execute()
+        jobs = jobs_response.data or []
+        
+        # Compute similarity scores
+        matches = []
+        for job in jobs:
+            job_embedding = job.get('raw', {}).get('embedding')
+            if not job_embedding:
+                continue
+            
+            try:
+                score = cosine_similarity(resume_embedding, job_embedding)
+                matches.append({
+                    "job": job,
+                    "score": round(score, 4),
+                    "match_percentage": round(score * 100, 1)
+                })
+            except Exception as sim_err:
+                logger.warning(f"Failed to compute similarity for job {job.get('id')}: {sim_err}")
+        
+        # Sort by score descending and take top_n
+        matches.sort(key=lambda x: x['score'], reverse=True)
+        top_matches = matches[:top_n]
+        
+        return {
+            "matches": top_matches,
+            "total_jobs_with_embeddings": len(matches),
+            "message": f"Found {len(top_matches)} top matches"
+        }
+        
+    except Exception as e:
+        logger.exception("Error fetching job matches: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch job matches: {str(e)}")
+
+
+@app.get("/user/{user_id}/profile")
+async def get_user_profile(user_id: str):
+    """
+    Get user profile and latest resume information.
+    Returns user profile data and the ID of their current resume.
+    """
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Supabase client not available")
+    
+    try:
+        # Fetch user profile
+        user_response = supabase_client.table('users').select('id, email, profile, created_at').eq('id', user_id).limit(1).execute()
+        
+        if not user_response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user = user_response.data[0]
+        
+        # Fetch latest resume
+        resume_response = supabase_client.table('resumes').select('id, created_at').eq('user_id', user_id).eq('is_current', True).order('created_at', desc=True).limit(1).execute()
+        
+        latest_resume_id = resume_response.data[0]['id'] if resume_response.data else None
+        
+        return {
+            "user": user,
+            "latest_resume_id": latest_resume_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching user profile: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch profile: {str(e)}")
+
+
+@app.get("/user/{user_id}/resume")
+async def get_latest_resume(user_id: str):
+    """
+    Get user's latest resume with full details.
+    Returns the most recent resume including text, parsed data, and preview.
+    """
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Supabase client not available")
+    
+    try:
+        # Fetch latest resume
+        resume_response = supabase_client.table('resumes').select('*').eq('user_id', user_id).eq('is_current', True).order('created_at', desc=True).limit(1).execute()
+        
+        if not resume_response.data:
+            return {"resume": None}
+        
+        return {"resume": resume_response.data[0]}
+        
+    except Exception as e:
+        logger.exception("Error fetching latest resume: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch resume: {str(e)}")
+
+
+@app.post("/worker/start")
+async def start_worker(interval: int = 300, headless: bool = True):
+    """
+    Start the Gemini Apply Worker in background.
+    
+    Args:
+        interval: Seconds between worker runs (default: 300 = 5 minutes)
+        headless: Run browser in headless mode (default: True)
+    """
+    try:
+        # Import worker manager
+        sys.path.append(str(Path(__file__).parent.parent))
+        from workers.worker_manager import WorkerManager
+        
+        manager = WorkerManager()
+        
+        if manager.is_running():
+            raise HTTPException(status_code=400, detail="Worker is already running")
+        
+        success = manager.start(headless=headless, interval=interval)
+        
+        if success:
+            status = manager.get_status()
+            return {
+                "message": "Worker started successfully",
+                "status": status
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to start worker")
+            
+    except Exception as e:
+        logger.exception("Error starting worker: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to start worker: {str(e)}")
+
+
+@app.post("/worker/stop")
+async def stop_worker(force: bool = False):
+    """
+    Stop the Gemini Apply Worker.
+    
+    Args:
+        force: Force kill the worker (default: False for graceful shutdown)
+    """
+    try:
+        sys.path.append(str(Path(__file__).parent.parent))
+        from workers.worker_manager import WorkerManager
+        
+        manager = WorkerManager()
+        
+        if not manager.is_running():
+            raise HTTPException(status_code=400, detail="Worker is not running")
+        
+        success = manager.stop(force=force)
+        
+        if success:
+            return {"message": "Worker stopped successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to stop worker")
+            
+    except Exception as e:
+        logger.exception("Error stopping worker: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to stop worker: {str(e)}")
+
+
+@app.post("/worker/restart")
+async def restart_worker(interval: int = 300, headless: bool = True):
+    """
+    Restart the Gemini Apply Worker.
+    
+    Args:
+        interval: Seconds between worker runs (default: 300)
+        headless: Run browser in headless mode (default: True)
+    """
+    try:
+        sys.path.append(str(Path(__file__).parent.parent))
+        from workers.worker_manager import WorkerManager
+        
+        manager = WorkerManager()
+        success = manager.restart(headless=headless, interval=interval)
+        
+        if success:
+            status = manager.get_status()
+            return {
+                "message": "Worker restarted successfully",
+                "status": status
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to restart worker")
+            
+    except Exception as e:
+        logger.exception("Error restarting worker: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to restart worker: {str(e)}")
+
+
+@app.get("/worker/health")
+async def worker_health():
+    """
+    Get worker health status with detailed checks.
+    """
+    try:
+        sys.path.append(str(Path(__file__).parent.parent))
+        from workers.worker_manager import WorkerManager
+        
+        manager = WorkerManager()
+        health = manager.health_check()
+        
+        return health
+        
+    except Exception as e:
+        logger.exception("Error checking worker health: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to check worker health: {str(e)}")
+
+
+@app.put("/user/{user_id}/profile")
+async def update_user_profile(user_id: str, profile: Dict[str, Any]):
+    """
+    Update user profile information.
+    
+    Accepts:
+    - name, bio, location
+    - skills, experience_level, current_role
+    - preferences (job types, remote, salary range)
+    - social links (LinkedIn, GitHub, Portfolio)
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        # Update user profile
+        result = supabase_client.table('users').update({
+            'profile': profile,
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }).eq('id', user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "message": "Profile updated successfully",
+            "profile": result.data[0]['profile']
+        }
+        
+    except Exception as e:
+        logger.exception("Error updating profile: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
+
+
+@app.get("/user/{user_id}/settings")
+async def get_user_settings(user_id: str):
+    """
+    Get user settings and preferences.
+    
+    Returns:
+    - notification_preferences
+    - privacy_settings
+    - application_preferences
+    - email_preferences
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        result = supabase_client.table('users').select('profile, email').eq('id', user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user = result.data[0]
+        profile = user.get('profile', {})
+        
+        # Extract settings from profile
+        settings = {
+            'notifications': profile.get('notifications', {
+                'email_on_application': True,
+                'email_on_match': True,
+                'email_weekly_summary': True,
+                'push_notifications': False
+            }),
+            'privacy': profile.get('privacy', {
+                'profile_visible': True,
+                'show_resume': False,
+                'anonymous_applications': False
+            }),
+            'application_preferences': profile.get('application_preferences', {
+                'auto_apply_threshold': 70,
+                'preferred_job_types': ['full-time', 'remote'],
+                'salary_min': 0,
+                'salary_max': 0,
+                'willing_to_relocate': False
+            }),
+            'email': user.get('email')
+        }
+        
+        return settings
+        
+    except Exception as e:
+        logger.exception("Error fetching settings: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch settings: {str(e)}")
+
+
+@app.put("/user/{user_id}/settings")
+async def update_user_settings(user_id: str, settings: Dict[str, Any]):
+    """
+    Update user settings and preferences.
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        # Get current profile
+        result = supabase_client.table('users').select('profile').eq('id', user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        current_profile = result.data[0].get('profile', {})
+        
+        # Merge settings into profile
+        updated_profile = {
+            **current_profile,
+            'notifications': settings.get('notifications', current_profile.get('notifications', {})),
+            'privacy': settings.get('privacy', current_profile.get('privacy', {})),
+            'application_preferences': settings.get('application_preferences', current_profile.get('application_preferences', {}))
+        }
+        
+        # Update
+        update_result = supabase_client.table('users').update({
+            'profile': updated_profile,
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }).eq('id', user_id).execute()
+        
+        return {
+            "message": "Settings updated successfully",
+            "settings": {
+                'notifications': updated_profile.get('notifications'),
+                'privacy': updated_profile.get('privacy'),
+                'application_preferences': updated_profile.get('application_preferences')
+            }
+        }
+        
+    except Exception as e:
+        logger.exception("Error updating settings: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update settings: {str(e)}")
+
+
+@app.post("/user/{user_id}/avatar")
+async def upload_avatar(user_id: str, file: UploadFile = File(...)):
+    """
+    Upload user profile avatar to Supabase Storage.
+    
+    Returns URL to uploaded avatar.
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        # Validate file type
+        allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="Invalid file type. Only JPEG, PNG, GIF, WEBP allowed")
+        
+        # Validate file size (max 5MB)
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large. Max 5MB allowed")
+        
+        # Generate unique filename
+        ext = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
+        filename = f"{user_id}/avatar.{ext}"
+        
+        # Upload to Supabase Storage
+        # Note: This requires Supabase Storage to be configured with an 'avatars' bucket
+        try:
+            # Delete old avatar if exists
+            supabase_client.storage.from_('avatars').remove([filename])
+        except:
+            pass  # Ignore if file doesn't exist
+        
+        # Upload new avatar
+        upload_result = supabase_client.storage.from_('avatars').upload(
+            filename,
+            contents,
+            {'content-type': file.content_type}
+        )
+        
+        # Get public URL
+        avatar_url = supabase_client.storage.from_('avatars').get_public_url(filename)
+        
+        # Update user profile with avatar URL
+        result = supabase_client.table('users').select('profile').eq('id', user_id).execute()
+        current_profile = result.data[0].get('profile', {}) if result.data else {}
+        
+        updated_profile = {
+            **current_profile,
+            'avatar_url': avatar_url
+        }
+        
+        supabase_client.table('users').update({
+            'profile': updated_profile
+        }).eq('id', user_id).execute()
+        
+        return {
+            "message": "Avatar uploaded successfully",
+            "avatar_url": avatar_url
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error uploading avatar: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to upload avatar: {str(e)}")
+
+
+@app.delete("/user/{user_id}/avatar")
+async def delete_avatar(user_id: str):
+    """
+    Delete user profile avatar.
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        # Get current profile
+        result = supabase_client.table('users').select('profile').eq('id', user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        current_profile = result.data[0].get('profile', {})
+        avatar_url = current_profile.get('avatar_url')
+        
+        if avatar_url:
+            # Extract filename from URL
+            # Assuming URL format: https://.../storage/v1/object/public/avatars/{user_id}/avatar.{ext}
+            try:
+                filename = f"{user_id}/avatar.jpg"  # Try common extensions
+                supabase_client.storage.from_('avatars').remove([filename])
+            except:
+                pass
+        
+        # Remove avatar_url from profile
+        updated_profile = {k: v for k, v in current_profile.items() if k != 'avatar_url'}
+        
+        supabase_client.table('users').update({
+            'profile': updated_profile
+        }).eq('id', user_id).execute()
+        
+        return {"message": "Avatar deleted successfully"}
+        
+    except Exception as e:
+        logger.exception("Error deleting avatar: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete avatar: {str(e)}")
+
+
+@app.get("/user/{user_id}/analytics")
+async def get_user_analytics(user_id: str, days: int = 30):
+    """
+    Get comprehensive analytics for user.
+    
+    Returns:
+    - Application statistics (by status, over time)
+    - Top matched jobs
+    - Skills analysis
+    - Success rate trends
+    - Activity timeline
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        from datetime import timedelta
+        
+        # Calculate date range
+        end_date = datetime.now(timezone.utc)
+        start_date = end_date - timedelta(days=days)
+        
+        # Fetch applications
+        apps_result = supabase_client.table('applications').select(
+            '*'
+        ).eq('user_id', user_id).gte(
+            'created_at', start_date.isoformat()
+        ).execute()
+        
+        applications = apps_result.data if apps_result.data else []
+        
+        # Fetch jobs for these applications
+        job_ids = [app['job_id'] for app in applications if app.get('job_id')]
+        jobs = []
+        if job_ids:
+            jobs_result = supabase_client.table('jobs').select('*').in_('id', job_ids).execute()
+            jobs = jobs_result.data if jobs_result.data else []
+        
+        # Application status breakdown
+        status_counts = {}
+        for app in applications:
+            status = app.get('status', 'unknown')
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Applications over time (grouped by day)
+        timeline = {}
+        for app in applications:
+            date = app['created_at'][:10]  # YYYY-MM-DD
+            timeline[date] = timeline.get(date, 0) + 1
+        
+        # Fill in missing dates with 0
+        current = start_date
+        while current <= end_date:
+            date_str = current.strftime('%Y-%m-%d')
+            if date_str not in timeline:
+                timeline[date_str] = 0
+            current += timedelta(days=1)
+        
+        # Sort timeline
+        sorted_timeline = sorted(timeline.items())
+        
+        # Top companies applied to
+        company_counts = {}
+        for job in jobs:
+            company = job.get('company', 'Unknown')
+            company_counts[company] = company_counts.get(company, 0) + 1
+        
+        top_companies = sorted(company_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        # Success rate calculation
+        total_apps = len(applications)
+        successful_apps = sum(1 for app in applications if app.get('status') in ['applied', 'submitted', 'interview', 'accepted'])
+        success_rate = (successful_apps / total_apps * 100) if total_apps > 0 else 0
+        
+        # Recent activity
+        recent_activity = []
+        for app in sorted(applications, key=lambda x: x['created_at'], reverse=True)[:10]:
+            job = next((j for j in jobs if j['id'] == app['job_id']), None)
+            recent_activity.append({
+                'date': app['created_at'],
+                'status': app.get('status'),
+                'job_title': job.get('title') if job else 'Unknown',
+                'company': job.get('company') if job else 'Unknown'
+            })
+        
+        # Skills from jobs
+        all_skills = []
+        for job in jobs:
+            if job.get('raw', {}).get('skills'):
+                all_skills.extend(job['raw']['skills'])
+        
+        skill_counts = {}
+        for skill in all_skills:
+            skill_counts[skill] = skill_counts.get(skill, 0) + 1
+        
+        top_skills = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+        
+        analytics = {
+            'summary': {
+                'total_applications': total_apps,
+                'success_rate': round(success_rate, 1),
+                'days_active': days,
+                'avg_applications_per_day': round(total_apps / days, 1) if days > 0 else 0
+            },
+            'status_breakdown': status_counts,
+            'timeline': {
+                'labels': [item[0] for item in sorted_timeline],
+                'data': [item[1] for item in sorted_timeline]
+            },
+            'top_companies': [
+                {'company': company, 'count': count} 
+                for company, count in top_companies
+            ],
+            'top_skills': [
+                {'skill': skill, 'count': count}
+                for skill, count in top_skills
+            ],
+            'recent_activity': recent_activity,
+            'insights': generate_insights(applications, jobs, success_rate, total_apps)
+        }
+        
+        return analytics
+        
+    except Exception as e:
+        logger.exception("Error fetching analytics: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch analytics: {str(e)}")
+
+
+def generate_insights(applications, jobs, success_rate, total_apps):
+    """Generate AI-powered insights from analytics data."""
+    insights = []
+    
+    # Success rate insight
+    if success_rate >= 70:
+        insights.append({
+            'type': 'positive',
+            'message': f'Great job! Your {success_rate:.0f}% success rate is excellent.',
+            'icon': 'trending_up'
+        })
+    elif success_rate >= 40:
+        insights.append({
+            'type': 'neutral',
+            'message': f'Your {success_rate:.0f}% success rate is good. Consider optimizing your resume for better matches.',
+            'icon': 'info'
+        })
+    else:
+        insights.append({
+            'type': 'warning',
+            'message': f'Your {success_rate:.0f}% success rate could be improved. Try targeting jobs with higher match scores.',
+            'icon': 'alert'
+        })
+    
+    # Activity insight
+    if total_apps < 5:
+        insights.append({
+            'type': 'tip',
+            'message': 'Apply to more jobs to increase your chances. Aim for 10-15 applications per week.',
+            'icon': 'lightbulb'
+        })
+    elif total_apps > 50:
+        insights.append({
+            'type': 'positive',
+            'message': f'Wow! {total_apps} applications shows great dedication. Keep it up!',
+            'icon': 'star'
+        })
+    
+    # Job diversity insight
+    companies = set(job.get('company') for job in jobs)
+    if len(companies) < 5 and total_apps > 10:
+        insights.append({
+            'type': 'tip',
+            'message': 'Consider diversifying your applications across more companies.',
+            'icon': 'target'
+        })
+    
+    return insights
+
+
+@app.get("/analytics/global")
+async def get_global_analytics():
+    """
+    Get global platform analytics (anonymized).
+    
+    Returns:
+    - Total users
+    - Total applications
+    - Success rate trends
+    - Popular skills
+    - Top job sources
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        # Total applications
+        apps_result = supabase_client.table('applications').select('id, status').execute()
+        total_apps = len(apps_result.data) if apps_result.data else 0
+        
+        # Status breakdown
+        status_counts = {}
+        for app in (apps_result.data or []):
+            status = app.get('status', 'unknown')
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Total jobs
+        jobs_result = supabase_client.table('jobs').select('id, source').execute()
+        total_jobs = len(jobs_result.data) if jobs_result.data else 0
+        
+        # Source breakdown
+        source_counts = {}
+        for job in (jobs_result.data or []):
+            source = job.get('source', 'unknown')
+            source_counts[source] = source_counts.get(source, 0) + 1
+        
+        # Total users
+        users_result = supabase_client.table('users').select('id').execute()
+        total_users = len(users_result.data) if users_result.data else 0
+        
+        global_analytics = {
+            'platform_stats': {
+                'total_users': total_users,
+                'total_applications': total_apps,
+                'total_jobs': total_jobs,
+                'avg_applications_per_user': round(total_apps / total_users, 1) if total_users > 0 else 0
+            },
+            'status_breakdown': status_counts,
+            'job_sources': source_counts,
+            'last_updated': datetime.now(timezone.utc).isoformat()
+        }
+        
+        return global_analytics
+        
+    except Exception as e:
+        logger.exception("Error fetching global analytics: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch global analytics: {str(e)}")
 
 
 @app.get("/")
