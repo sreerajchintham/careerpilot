@@ -66,14 +66,15 @@ class GeminiAIAgent:
         genai.configure(api_key=self.api_key)
         
         # Use Gemini 2.5 Flash for text generation (faster and more cost-effective)
-        self.text_model = genai.GenerativeModel('models/gemini-2.5-flash')
+        self.text_model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # Use Gemini Pro Vision for form analysis (if needed)
+        # Use Gemini 2.5 Pro for multimodal tasks (vision + text analysis)
+        # Note: Gemini 2.5 models have native multimodal support
         try:
-            self.vision_model = genai.GenerativeModel('gemini-pro-vision')
+            self.vision_model = genai.GenerativeModel('gemini-2.5-pro')
         except:
             self.vision_model = None
-            logger.warning("Gemini Pro Vision not available")
+            logger.warning("Gemini 2.5 Pro not available, falling back to text-only")
         
         logger.info("✅ Gemini AI Agent initialized successfully")
     
@@ -385,7 +386,8 @@ class GeminiApplyWorker:
         """Initialize the Gemini-powered application worker."""
         # Initialize Supabase
         self.supabase_url = os.getenv('SUPABASE_URL')
-        self.supabase_key = os.getenv('SUPABASE_ANON_KEY')
+        # Use service role key for worker to bypass RLS policies
+        self.supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_ANON_KEY')
         
         if not self.supabase_url or not self.supabase_key:
             raise ValueError("Supabase credentials not found in environment")
@@ -490,8 +492,8 @@ class GeminiApplyWorker:
             if not match_analysis.get('should_apply', True):
                 logger.info(f"AI recommends not applying: {match_analysis.get('reasoning')}")
                 return {
-                    'status': 'skipped',
-                    'reason': 'AI recommendation: not a good match',
+                    'status': 'not_viable',
+                    'reason': 'AI determined this is not a good match',
                     'match_analysis': match_analysis,
                     'application_id': application_id
                 }
@@ -508,24 +510,24 @@ class GeminiApplyWorker:
                 # TODO: Implement platform-specific application logic
                 logger.info(f"Platform {source} detected, would automate application here")
                 
-                # For now, save the generated materials
+                # For now, save the generated materials (NOT actually applied yet)
                 result = {
-                    'status': 'applied',
+                    'status': 'materials_ready',
                     'method': 'gemini_ai_agent',
-                    'applied_at': datetime.now(timezone.utc).isoformat(),
+                    'materials_generated_at': datetime.now(timezone.utc).isoformat(),
                     'match_analysis': match_analysis,
                     'generated_materials': {
                         'cover_letter': cover_letter
                     },
-                    'note': f'AI-powered application to {source} (automation pending)',
+                    'note': f'AI-powered materials ready for {source} (browser automation not yet implemented)',
                     'application_id': application_id
                 }
             else:
                 # Generic application - save materials for manual submission
                 result = {
-                    'status': 'applied',
+                    'status': 'materials_ready',
                     'method': 'gemini_ai_materials_only',
-                    'applied_at': datetime.now(timezone.utc).isoformat(),
+                    'materials_generated_at': datetime.now(timezone.utc).isoformat(),
                     'match_analysis': match_analysis,
                     'generated_materials': {
                         'cover_letter': cover_letter
@@ -550,15 +552,39 @@ class GeminiApplyWorker:
     async def update_application_status(self, application_id: str, result: Dict[str, Any]):
         """Update application status in database."""
         try:
+            # Map internal status to database status
+            # 'materials_ready' stays as is
+            # 'not_viable' stays as is (AI rejected)
+            # 'applied' would become 'submitted' (when we actually implement automation)
+            db_status = result['status']
+            if result['status'] == 'applied':
+                db_status = 'submitted'
+            
+            # Store full match analysis in artifacts for frontend display
+            artifacts = result.get('generated_materials', {})
+            if result.get('match_analysis'):
+                artifacts['match_analysis'] = result['match_analysis']
+            
+            # Build attempt_meta
+            attempt_meta = {
+                'applied_at': result.get('applied_at'),
+                'materials_generated_at': result.get('materials_generated_at'),
+                'method': result.get('method'),
+                'match_score': result.get('match_analysis', {}).get('match_score'),
+                'ai_agent': 'gemini-2.5-flash',
+                'note': result.get('note', '')
+            }
+            
+            # For not_viable status, add rejection details
+            if db_status == 'not_viable':
+                attempt_meta['rejection_reason'] = result.get('reason', 'AI determined poor match')
+                attempt_meta['rejected_at'] = datetime.now(timezone.utc).isoformat()
+                attempt_meta['ai_reasoning'] = result.get('match_analysis', {}).get('reasoning', '')
+            
             update_data = {
-                'status': 'submitted' if result['status'] == 'applied' else result['status'],
-                'artifacts': result.get('generated_materials', {}),
-                'attempt_meta': {
-                    'applied_at': result.get('applied_at'),
-                    'method': result.get('method'),
-                    'match_score': result.get('match_analysis', {}).get('match_score'),
-                    'ai_agent': 'gemini-pro'
-                },
+                'status': db_status,
+                'artifacts': artifacts,
+                'attempt_meta': attempt_meta,
                 'updated_at': datetime.now(timezone.utc).isoformat()
             }
             
@@ -605,9 +631,9 @@ class GeminiApplyWorker:
                 result = await self.process_application(app)
                 results.append(result)
                 
-                if result['status'] == 'applied':
+                if result['status'] in ['applied', 'materials_ready']:
                     processed += 1
-                elif result['status'] == 'skipped':
+                elif result['status'] in ['skipped', 'not_viable']:
                     skipped += 1
                 else:
                     failed += 1

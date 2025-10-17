@@ -16,13 +16,19 @@ import toast from 'react-hot-toast'
 import { supabase, Job } from '../../lib/supabase'
 import apiClient from '../../lib/api'
 
+interface JobWithMatch extends Job {
+  matchScore?: number
+  matchPercentage?: number
+}
+
 export default function JobScraping() {
   const { user, loading } = useAuth()
   const router = useRouter()
   const [scraping, setScraping] = useState(false)
-  const [jobs, setJobs] = useState<Job[]>([])
+  const [jobs, setJobs] = useState<JobWithMatch[]>([])
   const [loadingJobs, setLoadingJobs] = useState(true)
   const [queueingJobs, setQueueingJobs] = useState<Set<string>>(new Set())
+  const [loadingMatches, setLoadingMatches] = useState(false)
   const [filters, setFilters] = useState({
     keywords: 'Software Engineer',
     location: 'Remote',
@@ -39,6 +45,7 @@ export default function JobScraping() {
   useEffect(() => {
     if (user) {
       fetchJobs()
+      fetchJobMatches()
     }
   }, [user])
 
@@ -61,18 +68,63 @@ export default function JobScraping() {
     }
   }
 
+  const fetchJobMatches = async () => {
+    if (!user) return
+    
+    setLoadingMatches(true)
+    try {
+      const matchData = await apiClient.getUserJobMatches(user.id, 100)
+      
+      if (matchData.matches && matchData.matches.length > 0) {
+        // Create a map of job ID to match score
+        const matchScores = new Map<string, { score: number; percentage: number }>()
+        matchData.matches.forEach((match: any) => {
+          matchScores.set(match.job.id, {
+            score: match.score,
+            percentage: match.match_percentage
+          })
+        })
+        
+        // Update jobs with match scores
+        setJobs(prevJobs => 
+          prevJobs.map(job => ({
+            ...job,
+            matchScore: matchScores.get(job.id)?.score,
+            matchPercentage: matchScores.get(job.id)?.percentage
+          }))
+        )
+        
+        toast.success(`Computed match scores for ${matchData.matches.length} jobs`)
+      }
+    } catch (error) {
+      console.error('Error fetching job matches:', error)
+      // Don't show error toast - matching is optional
+    } finally {
+      setLoadingMatches(false)
+    }
+  }
+
   const startScraping = async () => {
     setScraping(true)
     try {
       const res = await apiClient.startScraping({ api: 'all', keywords: filters.keywords, location: filters.location, max_results: filters.maxResults })
       toast.success(`${res.message} (sources: ${res.sources.join(', ') || 'n/a'})`)
       await fetchJobs()
+      await fetchJobMatches() // Recompute matches after scraping
     } catch (error: any) {
       console.error('Scrape error:', error)
       toast.error(error.response?.data?.detail || 'Failed to start scraping')
     } finally {
       setScraping(false)
     }
+  }
+
+  const getMatchColor = (percentage?: number) => {
+    if (!percentage) return 'bg-gray-100 text-gray-800'
+    if (percentage >= 80) return 'bg-green-100 text-green-800 border-green-300'
+    if (percentage >= 60) return 'bg-blue-100 text-blue-800 border-blue-300'
+    if (percentage >= 40) return 'bg-yellow-100 text-yellow-800 border-yellow-300'
+    return 'bg-orange-100 text-orange-800 border-orange-300'
   }
 
   const getSourceColor = (source: string) => {
@@ -98,6 +150,24 @@ export default function JobScraping() {
       return
     }
 
+    // Find the job to validate it has a URL
+    const job = jobs.find(j => j.id === jobId)
+    
+    if (!job) {
+      toast.error('Job not found')
+      return
+    }
+
+    // CRITICAL: Check if job has an application URL
+    if (!job.raw?.url || !job.raw.url.trim()) {
+      toast.error(
+        `Cannot queue "${job.title}" - This job has no application URL. ` +
+        `Please contact the company directly or find a different posting.`,
+        { duration: 6000 }
+      )
+      return
+    }
+
     // Add job to queueing set
     setQueueingJobs(prev => new Set(prev).add(jobId))
 
@@ -111,7 +181,18 @@ export default function JobScraping() {
       toast.success('Job queued for application! Check the Applications page.')
     } catch (error: any) {
       console.error('Error queueing job:', error)
-      toast.error(error.response?.data?.detail || 'Failed to queue job for application')
+      
+      // Handle URL validation errors from backend
+      const errorDetail = error.response?.data?.detail
+      if (errorDetail && typeof errorDetail === 'object' && errorDetail.jobs_without_urls) {
+        const jobsWithoutUrls = errorDetail.jobs_without_urls
+        toast.error(
+          `Cannot queue jobs without application URLs:\n${jobsWithoutUrls.map((j: any) => `• ${j.title} at ${j.company}`).join('\n')}`,
+          { duration: 8000 }
+        )
+      } else {
+        toast.error(errorDetail?.error || errorDetail || 'Failed to queue job for application')
+      }
     } finally {
       // Remove job from queueing set
       setQueueingJobs(prev => {
@@ -286,6 +367,11 @@ export default function JobScraping() {
                         <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getSourceColor(job.source)}`}>
                           {job.source}
                         </span>
+                        {job.matchPercentage !== undefined && (
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold border ${getMatchColor(job.matchPercentage)}`}>
+                            {job.matchPercentage}% Match
+                          </span>
+                        )}
                       </div>
                       
                       <div className="flex items-center space-x-4 text-sm text-gray-500 mb-2">
@@ -332,32 +418,48 @@ export default function JobScraping() {
                     </div>
 
                     <div className="ml-4 flex flex-col items-end space-y-2">
-                      {job.raw.url && (
-                        <a
-                          href={job.raw.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-indigo-600 hover:text-indigo-500 text-sm font-medium flex items-center"
-                        >
-                          <ExternalLink className="h-4 w-4 mr-1" />
-                          View Job
-                        </a>
+                      {job.raw.url ? (
+                        <>
+                          <a
+                            href={job.raw.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-indigo-600 hover:text-indigo-500 text-sm font-medium flex items-center"
+                          >
+                            <ExternalLink className="h-4 w-4 mr-1" />
+                            View Job
+                          </a>
+                          
+                          <button
+                            onClick={() => queueJobForApplication(job.id)}
+                            disabled={queueingJobs.has(job.id)}
+                            className="bg-indigo-600 text-white px-3 py-1 rounded-md text-xs font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                          >
+                            {queueingJobs.has(job.id) ? (
+                              <>
+                                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white mr-1"></div>
+                                Queueing...
+                              </>
+                            ) : (
+                              'Queue for Application'
+                            )}
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <div className="text-xs text-red-500 font-medium flex items-center">
+                            <AlertCircle className="h-3 w-3 mr-1" />
+                            No URL Available
+                          </div>
+                          <button
+                            disabled
+                            className="bg-gray-400 text-gray-200 px-3 py-1 rounded-md text-xs font-medium cursor-not-allowed flex items-center opacity-50"
+                            title="Cannot queue: Job has no application URL"
+                          >
+                            Cannot Queue
+                          </button>
+                        </>
                       )}
-                      
-                      <button
-                        onClick={() => queueJobForApplication(job.id)}
-                        disabled={queueingJobs.has(job.id)}
-                        className="bg-indigo-600 text-white px-3 py-1 rounded-md text-xs font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-                      >
-                        {queueingJobs.has(job.id) ? (
-                          <>
-                            <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white mr-1"></div>
-                            Queueing...
-                          </>
-                        ) : (
-                          'Queue for Application'
-                        )}
-                      </button>
                     </div>
                   </div>
                 </div>

@@ -16,20 +16,48 @@ import {
   Activity,
   TrendingUp,
   Users,
-  Zap
+  Zap,
+  FileText,
+  Award,
+  ThumbsUp
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import apiClient from '../../lib/api'
+import ApplicationMaterialsModal from '../../components/ApplicationMaterialsModal'
 
 interface Application {
   id: string
   user_id: string
   job_id: string
-  status: 'pending' | 'applied' | 'failed' | 'skipped'
+  status: 'draft' | 'not_viable' | 'materials_ready' | 'submitted' | 'under_review' | 'interview' | 'rejected' | 'accepted' | 'pending' | 'applied' | 'failed' | 'skipped'
   created_at: string
   updated_at: string
-  artifacts?: any
-  attempt_meta?: any
+  artifacts?: {
+    cover_letter?: string
+    match_analysis?: {
+      match_score: number
+      key_strengths: string[]
+      areas_to_address: string[]
+      gaps: string[]
+      recommendations: string[]
+      should_apply: boolean
+      reasoning: string
+    }
+    resume_version?: string
+  }
+  attempt_meta?: {
+    queued_at?: string
+    applied_at?: string
+    materials_generated_at?: string
+    rejected_at?: string
+    rejection_reason?: string
+    method?: string
+    match_score?: number
+    ai_agent?: string
+    note?: string
+    ai_reasoning?: string
+  }
+  jobs?: Job
 }
 
 interface Job {
@@ -61,6 +89,10 @@ export default function Applications() {
   const [detailsLoading, setDetailsLoading] = useState(false)
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [applicationDetails, setApplicationDetails] = useState<any | null>(null)
+  const [workerHealth, setWorkerHealth] = useState<any | null>(null)
+  const [workerControlLoading, setWorkerControlLoading] = useState(false)
+  const [materialsModalOpen, setMaterialsModalOpen] = useState(false)
+  const [selectedApplication, setSelectedApplication] = useState<Application | null>(null)
 
   useEffect(() => {
     if (!loading && !user) {
@@ -72,7 +104,19 @@ export default function Applications() {
     if (user) {
       fetchApplications()
       fetchWorkerStatus()
+      fetchWorkerHealth()
     }
+  }, [user])
+
+  useEffect(() => {
+    // Auto-refresh worker health every 30 seconds
+    const interval = setInterval(() => {
+      if (user) {
+        fetchWorkerHealth()
+      }
+    }, 30000)
+    
+    return () => clearInterval(interval)
   }, [user])
 
   const fetchApplications = async () => {
@@ -104,8 +148,59 @@ export default function Applications() {
     }
   }
 
+  const fetchWorkerHealth = async () => {
+    try {
+      const health = await apiClient.getWorkerHealth()
+      setWorkerHealth(health)
+    } catch (error: any) {
+      console.error('Error fetching worker health:', error)
+    }
+  }
+
+  const startWorker = async () => {
+    setWorkerControlLoading(true)
+    try {
+      await apiClient.startWorker(300, true)
+      toast.success('Worker started successfully!')
+      await fetchWorkerHealth()
+      await fetchWorkerStatus()
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || 'Failed to start worker')
+    } finally {
+      setWorkerControlLoading(false)
+    }
+  }
+
+  const stopWorker = async () => {
+    setWorkerControlLoading(true)
+    try {
+      await apiClient.stopWorker(false)
+      toast.success('Worker stopped successfully!')
+      await fetchWorkerHealth()
+      await fetchWorkerStatus()
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || 'Failed to stop worker')
+    } finally {
+      setWorkerControlLoading(false)
+    }
+  }
+
+  const restartWorker = async () => {
+    setWorkerControlLoading(true)
+    try {
+      await apiClient.restartWorker(300, true)
+      toast.success('Worker restarted successfully!')
+      await fetchWorkerHealth()
+      await fetchWorkerStatus()
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || 'Failed to restart worker')
+    } finally {
+      setWorkerControlLoading(false)
+    }
+  }
+
   const refreshData = async () => {
-    await Promise.all([fetchApplications(), fetchWorkerStatus()])
+    await Promise.all([fetchApplications(), fetchWorkerStatus(), fetchWorkerHealth()])
   }
 
   const openDetails = async (applicationId: string) => {
@@ -123,16 +218,52 @@ export default function Applications() {
     }
   }
 
+  const openMaterialsModal = (application: Application) => {
+    setSelectedApplication(application)
+    setMaterialsModalOpen(true)
+  }
+
+  const handleMarkAsManuallySubmitted = async () => {
+    if (!selectedApplication) return
+
+    try {
+      // Call backend to mark as manually submitted
+      await apiClient.markApplicationAsManuallySubmitted(selectedApplication.id)
+      
+      toast.success('Application marked as manually submitted!')
+      setMaterialsModalOpen(false)
+      setSelectedApplication(null)
+      
+      // Refresh applications list
+      await fetchApplications()
+    } catch (error: any) {
+      console.error('Error marking as manually submitted:', error)
+      toast.error(error.response?.data?.detail || 'Failed to mark as submitted')
+    }
+  }
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'draft':
         return 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+      case 'not_viable':
+        return 'bg-orange-500/20 text-orange-400 border-orange-500/30'
+      case 'materials_ready':
+        return 'bg-purple-500/20 text-purple-400 border-purple-500/30'
+      case 'submitted':
       case 'applied':
         return 'bg-green-500/20 text-green-400 border-green-500/30'
+      case 'under_review':
+        return 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30'
+      case 'interview':
+        return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
       case 'pending':
         return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
       case 'failed':
+      case 'rejected':
         return 'bg-red-500/20 text-red-400 border-red-500/30'
+      case 'accepted':
+        return 'bg-teal-500/20 text-teal-400 border-teal-500/30'
       case 'skipped':
         return 'bg-gray-500/20 text-gray-400 border-gray-500/30'
       default:
@@ -144,11 +275,23 @@ export default function Applications() {
     switch (status) {
       case 'draft':
         return <Clock className="h-5 w-5 text-blue-400" />
+      case 'not_viable':
+        return <AlertCircle className="h-5 w-5 text-orange-400" />
+      case 'materials_ready':
+        return <FileText className="h-5 w-5 text-purple-400" />
+      case 'submitted':
       case 'applied':
         return <CheckCircle className="h-5 w-5 text-green-400" />
+      case 'under_review':
+        return <Eye className="h-5 w-5 text-cyan-400" />
+      case 'interview':
+        return <Users className="h-5 w-5 text-emerald-400" />
+      case 'accepted':
+        return <Award className="h-5 w-5 text-teal-400" />
       case 'pending':
         return <Clock className="h-5 w-5 text-yellow-400" />
       case 'failed':
+      case 'rejected':
         return <AlertCircle className="h-5 w-5 text-red-400" />
       case 'skipped':
         return <Pause className="h-5 w-5 text-gray-400" />
@@ -157,8 +300,52 @@ export default function Applications() {
     }
   }
 
+  const getStatusLabel = (status: string) => {
+    switch (status) {
+      case 'draft':
+        return 'Queued'
+      case 'not_viable':
+        return 'Not Recommended'
+      case 'materials_ready':
+        return 'Materials Ready'
+      case 'submitted':
+      case 'applied':
+        return 'Submitted'
+      case 'under_review':
+        return 'Under Review'
+      case 'interview':
+        return 'Interview'
+      case 'accepted':
+        return 'Accepted'
+      case 'rejected':
+        return 'Rejected'
+      case 'pending':
+        return 'Pending'
+      case 'failed':
+        return 'Failed'
+      case 'skipped':
+        return 'Skipped'
+      default:
+        return status.charAt(0).toUpperCase() + status.slice(1)
+    }
+  }
+
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString()
+  }
+
+  const calculateUptime = (startedAt: string) => {
+    const start = new Date(startedAt)
+    const now = new Date()
+    const diffMs = now.getTime() - start.getTime()
+    
+    const hours = Math.floor(diffMs / (1000 * 60 * 60))
+    const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60))
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`
+    }
+    return `${minutes}m`
   }
 
   const filteredApplications = applications.filter(app => {
@@ -192,87 +379,218 @@ export default function Applications() {
           </p>
         </div>
 
-        {/* Worker Status Dashboard */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          {/* Worker Status Card */}
-          <div className="card-futuristic rounded-2xl p-6">
-            <div className="flex items-center justify-between">
+        {/* Worker Status Banner */}
+        <div className="card-futuristic rounded-2xl p-4 mb-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Activity className={`h-6 w-6 ${workerHealth?.status?.running ? 'text-green-400' : 'text-gray-400'}`} />
               <div>
-                <p className="text-sm font-medium text-gray-400">WORKER STATUS</p>
-                <div className="flex items-center mt-2">
-                  <div className={`h-3 w-3 rounded-full mr-2 ${workerStatus?.worker_active ? 'bg-green-400 glow-green' : 'bg-red-400'}`}></div>
-                  <span className="text-lg font-bold text-gray-200">
-                    {workerStatus?.worker_active ? 'ACTIVE' : 'INACTIVE'}
+                <p className="text-xs font-medium text-gray-400 uppercase">AI Worker Status</p>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`w-2 h-2 rounded-full ${workerHealth?.status?.running ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></span>
+                  <span className={`text-lg font-bold ${workerHealth?.status?.running ? 'text-green-400' : 'text-gray-400'}`}>
+                    {workerHealth?.status?.running ? 'ACTIVE' : 'INACTIVE'}
+                  </span>
+                  {workerHealth?.status?.running && workerHealth?.status?.pid && (
+                    <span className="text-xs text-gray-500">
+                      (PID: {workerHealth.status.pid})
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+            {workerHealth?.status?.running && (
+              <div className="flex items-center gap-6 text-sm">
+                <div>
+                  <span className="text-gray-400">CPU:</span>
+                  <span className="ml-2 font-bold text-cyan-400">{workerHealth.status.cpu_percent?.toFixed(1)}%</span>
+                </div>
+                <div>
+                  <span className="text-gray-400">Memory:</span>
+                  <span className="ml-2 font-bold text-purple-400">{workerHealth.status.memory_mb?.toFixed(0)} MB</span>
+                </div>
+                <div>
+                  <span className="text-gray-400">Uptime:</span>
+                  <span className="ml-2 font-bold text-green-400">
+                    {workerHealth.status.started_at ? calculateUptime(workerHealth.status.started_at) : 'N/A'}
                   </span>
                 </div>
               </div>
-              <Activity className="h-8 w-8 text-cyan-400" />
-            </div>
+            )}
           </div>
+        </div>
 
-          {/* Pending Applications */}
+        {/* Application Statistics Dashboard */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          {/* Draft (Queued) */}
           <div className="card-futuristic rounded-2xl p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-400">PENDING</p>
-                <p className="text-2xl font-bold text-yellow-400">
-                  {workerStatus?.status_counts?.pending || 0}
+                <p className="text-xs font-medium text-gray-400 uppercase">Queued</p>
+                <p className="text-3xl font-bold text-blue-400 mt-2">
+                  {applications.filter(a => a.status === 'draft').length}
                 </p>
               </div>
-              <Clock className="h-8 w-8 text-yellow-400" />
+              <Clock className="h-8 w-8 text-blue-400 opacity-50" />
             </div>
           </div>
 
-          {/* Applied Applications */}
+          {/* Materials Ready */}
           <div className="card-futuristic rounded-2xl p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-400">APPLIED</p>
-                <p className="text-2xl font-bold text-green-400">
-                  {workerStatus?.status_counts?.applied || 0}
+                <p className="text-xs font-medium text-gray-400 uppercase">Ready</p>
+                <p className="text-3xl font-bold text-purple-400 mt-2">
+                  {applications.filter(a => a.status === 'materials_ready').length}
                 </p>
               </div>
-              <CheckCircle className="h-8 w-8 text-green-400" />
+              <FileText className="h-8 w-8 text-purple-400 opacity-50" />
             </div>
           </div>
 
-          {/* Failed Applications */}
+          {/* Submitted */}
           <div className="card-futuristic rounded-2xl p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-400">FAILED</p>
-                <p className="text-2xl font-bold text-red-400">
-                  {workerStatus?.status_counts?.failed || 0}
+                <p className="text-xs font-medium text-gray-400 uppercase">Submitted</p>
+                <p className="text-3xl font-bold text-green-400 mt-2">
+                  {applications.filter(a => ['submitted', 'applied', 'under_review', 'interview'].includes(a.status)).length}
                 </p>
               </div>
-              <AlertCircle className="h-8 w-8 text-red-400" />
+              <CheckCircle className="h-8 w-8 text-green-400 opacity-50" />
+            </div>
+          </div>
+
+          {/* Not Viable (Rejected by AI) */}
+          <div className="card-futuristic rounded-2xl p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-medium text-gray-400 uppercase">Not Viable</p>
+                <p className="text-3xl font-bold text-orange-400 mt-2">
+                  {applications.filter(a => a.status === 'not_viable').length}
+                </p>
+              </div>
+              <AlertCircle className="h-8 w-8 text-orange-400 opacity-50" />
+            </div>
+          </div>
+
+          {/* Rejected by Employer */}
+          <div className="card-futuristic rounded-2xl p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-medium text-gray-400 uppercase">Rejected</p>
+                <p className="text-3xl font-bold text-red-400 mt-2">
+                  {applications.filter(a => ['rejected', 'failed'].includes(a.status)).length}
+                </p>
+              </div>
+              <AlertCircle className="h-8 w-8 text-red-400 opacity-50" />
             </div>
           </div>
         </div>
 
         {/* Worker Controls */}
         <div className="card-futuristic rounded-2xl p-8">
-          <div className="flex items-center justify-between">
-            <div>
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex-1">
               <h2 className="text-2xl font-bold text-gray-200 flex items-center">
                 <Zap className="h-8 w-8 text-cyan-400 mr-3" />
                 AI APPLICATION WORKER
               </h2>
-              <p className="text-lg text-gray-300 mt-2">
-                Automatically process applications with AI analysis and submission.
-              </p>
+              <div className="flex items-center gap-3 mt-2">
+                {workerHealth?.status?.running ? (
+                  <>
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span>
+                      <span className="text-lg font-semibold text-green-400">Running</span>
+                    </span>
+                    {workerHealth?.status?.pid && (
+                      <span className="text-sm text-gray-400">
+                        (PID: {workerHealth.status.pid})
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 bg-gray-500 rounded-full"></span>
+                      <span className="text-lg font-semibold text-gray-400">Stopped</span>
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
-            <div className="flex items-center space-x-4">
+            
+            {/* Worker Control Buttons */}
+            <div className="flex items-center gap-3">
+              {workerHealth?.status?.running ? (
+                <>
+                  <button
+                    onClick={restartWorker}
+                    disabled={workerControlLoading}
+                    className="btn-futuristic px-6 py-3 text-sm font-bold rounded-xl bg-yellow-600/20 hover:bg-yellow-600/30 border border-yellow-500/30 text-yellow-400 flex items-center gap-2"
+                  >
+                    <RefreshCw className={`h-5 w-5 ${workerControlLoading ? 'animate-spin' : ''}`} />
+                    RESTART
+                  </button>
+                  <button
+                    onClick={stopWorker}
+                    disabled={workerControlLoading}
+                    className="btn-futuristic px-6 py-3 text-sm font-bold rounded-xl bg-red-600/20 hover:bg-red-600/30 border border-red-500/30 text-red-400 flex items-center gap-2"
+                  >
+                    <Pause className="h-5 w-5" />
+                    STOP
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={startWorker}
+                  disabled={workerControlLoading}
+                  className="btn-futuristic px-6 py-3 text-sm font-bold rounded-xl bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 text-green-400 flex items-center gap-2"
+                >
+                  <Play className="h-5 w-5" />
+                  START WORKER
+                </button>
+              )}
               <button
                 onClick={refreshData}
                 disabled={loadingApps || loadingWorker}
-                className="btn-futuristic px-8 py-4 text-lg font-bold rounded-xl flex items-center"
+                className="btn-futuristic px-6 py-3 text-sm font-bold rounded-xl flex items-center gap-2"
               >
-                <RefreshCw className={`h-6 w-6 mr-3 ${loadingApps || loadingWorker ? 'animate-spin' : ''}`} />
-                REFRESH DATA
+                <RefreshCw className={`h-5 w-5 ${loadingApps || loadingWorker ? 'animate-spin' : ''}`} />
+                REFRESH
               </button>
             </div>
           </div>
+
+          {/* Worker Health Metrics */}
+          {workerHealth?.status?.running && (
+            <div className="grid grid-cols-4 gap-4 mb-6">
+              <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
+                <p className="text-xs font-medium text-gray-400 mb-1">CPU Usage</p>
+                <p className="text-2xl font-bold text-cyan-400">
+                  {workerHealth.status.cpu_percent?.toFixed(1)}%
+                </p>
+              </div>
+              <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
+                <p className="text-xs font-medium text-gray-400 mb-1">Memory</p>
+                <p className="text-2xl font-bold text-purple-400">
+                  {workerHealth.status.memory_mb?.toFixed(0)} MB
+                </p>
+              </div>
+              <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
+                <p className="text-xs font-medium text-gray-400 mb-1">Uptime</p>
+                <p className="text-2xl font-bold text-green-400">
+                  {workerHealth.status.started_at ? calculateUptime(workerHealth.status.started_at) : 'N/A'}
+                </p>
+              </div>
+              <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
+                <p className="text-xs font-medium text-gray-400 mb-1">Status</p>
+                <p className="text-2xl font-bold text-yellow-400">
+                  {workerHealth.status.status || 'N/A'}
+                </p>
+              </div>
+            </div>
+          )}
 
           {loadingWorker && (
             <div className="mt-6 p-6 bg-gradient-to-r from-cyan-500/20 to-green-500/20 rounded-2xl border border-cyan-500/30">
@@ -300,7 +618,14 @@ export default function Applications() {
                   className="input-futuristic px-4 py-2 rounded-lg text-gray-200"
                 >
                   <option value="all">All Status</option>
-                  <option value="draft">Draft</option>
+                  <option value="draft">Draft (Queued)</option>
+                  <option value="not_viable">Not Recommended (AI Rejected)</option>
+                  <option value="materials_ready">Materials Ready</option>
+                  <option value="submitted">Submitted</option>
+                  <option value="under_review">Under Review</option>
+                  <option value="interview">Interview</option>
+                  <option value="accepted">Accepted</option>
+                  <option value="rejected">Rejected</option>
                   <option value="pending">Pending</option>
                   <option value="applied">Applied</option>
                   <option value="failed">Failed</option>
@@ -338,17 +663,23 @@ export default function Applications() {
                       <div className="flex-1">
                         <div className="flex items-center space-x-4 mb-3">
                           <h3 className="text-xl font-bold text-gray-200">
-                            {application.job_id || 'Unknown Position'}
+                            {application.jobs?.title || 'Unknown Position'}
                           </h3>
                           <span className={`inline-flex items-center px-4 py-2 rounded-xl text-sm font-bold border ${getStatusColor(application.status)}`}>
-                            {application.status.toUpperCase()}
+                            {getStatusLabel(application.status)}
                           </span>
                         </div>
                         
-                        <div className="flex items-center space-x-6 text-lg text-gray-400 mb-4">
-                          <span className="font-medium">Job ID: {application.job_id}</span>
+                        <div className="flex items-center space-x-6 text-sm text-gray-400 mb-4">
+                          <span className="font-medium">{application.jobs?.company || 'Unknown Company'}</span>
+                          {application.jobs?.location && (
+                            <>
+                              <span>•</span>
+                              <span>{application.jobs.location}</span>
+                            </>
+                          )}
                           <span>•</span>
-                          <span>Created {formatDate(application.created_at)}</span>
+                          <span>Applied {formatDate(application.created_at)}</span>
                           {application.updated_at !== application.created_at && (
                             <>
                               <span>•</span>
@@ -357,52 +688,64 @@ export default function Applications() {
                           )}
                         </div>
 
-                        {application.artifacts && (
+                        {/* Show AI Analysis only for materials_ready or not_viable status */}
+                        {(application.status === 'materials_ready' || application.status === 'not_viable') && application.artifacts?.match_analysis && (
                           <div className="mt-4 p-4 bg-gradient-to-r from-gray-800/50 to-gray-700/50 rounded-xl border border-gray-600">
                             <div className="text-sm">
                               <div className="flex items-center space-x-4 mb-3">
                                 <span className="font-bold text-cyan-400">
-                                  AI Analysis Available
+                                  AI Analysis
                                 </span>
-                                <span className="px-3 py-1 rounded-lg text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">
-                                  PROCESSED
-                                </span>
+                                <div className="flex items-center gap-3">
+                                  <span className="text-gray-400 text-xs">Match Score:</span>
+                                  <div className={`px-3 py-1 rounded-lg text-xs font-bold ${
+                                    (application.artifacts.match_analysis.match_score || 0) >= 80 
+                                      ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                                      : (application.artifacts.match_analysis.match_score || 0) >= 60
+                                      ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+                                      : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                  }`}>
+                                    {application.artifacts.match_analysis.match_score}/100
+                                  </div>
+                                </div>
                               </div>
                               
-                              {application.artifacts.match_analysis && (
-                                <div className="mb-3">
-                                  <p className="text-gray-300 text-sm">
-                                    Match Score: <span className="font-bold text-cyan-400">{application.artifacts.match_analysis.match_score}%</span>
-                                  </p>
-                                  {application.artifacts.match_analysis.reasoning && (
-                                    <p className="text-gray-400 text-xs mt-1">
-                                      {application.artifacts.match_analysis.reasoning}
-                                    </p>
-                                  )}
-                                </div>
+                              {application.artifacts.match_analysis.reasoning && (
+                                <p className="text-gray-400 text-xs mt-2 line-clamp-2">
+                                  {application.artifacts.match_analysis.reasoning}
+                                </p>
                               )}
 
                               {application.artifacts.cover_letter && (
-                                <div className="mt-3">
-                                  <p className="text-gray-300 text-sm font-medium mb-1">Cover Letter Generated:</p>
-                                  <p className="text-gray-400 text-xs line-clamp-2">
-                                    {application.artifacts.cover_letter.substring(0, 200)}...
-                                  </p>
+                                <div className="mt-3 pt-3 border-t border-gray-700">
+                                  <p className="text-gray-300 text-xs font-medium mb-1">✓ Cover Letter Generated ({application.artifacts.cover_letter.length} chars)</p>
                                 </div>
                               )}
                             </div>
                           </div>
                         )}
 
-                        {application.attempt_meta && (
-                          <div className="mt-3 p-3 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded-lg border border-blue-500/30">
-                            <p className="text-sm text-blue-400">
-                              <span className="font-bold">Attempts:</span> {application.attempt_meta.attempt_count || 0}
-                              {application.attempt_meta.queued_at && (
-                                <span className="ml-4">
-                                  <span className="font-bold">Queued:</span> {formatDate(application.attempt_meta.queued_at)}
+                        {/* Show Processing Info for materials_ready */}
+                        {application.status === 'materials_ready' && application.attempt_meta?.materials_generated_at && (
+                          <div className="mt-3 p-3 bg-gradient-to-r from-purple-500/10 to-blue-500/10 rounded-lg border border-purple-500/30">
+                            <p className="text-xs text-purple-400">
+                              <span className="font-bold">AI Processed:</span> {formatDate(application.attempt_meta.materials_generated_at)}
+                              {application.attempt_meta.ai_agent && (
+                                <span className="ml-3 text-gray-400">
+                                  ({application.attempt_meta.ai_agent})
                                 </span>
                               )}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Show Rejection Info for not_viable */}
+                        {application.status === 'not_viable' && application.attempt_meta && (
+                          <div className="mt-3 p-3 bg-gradient-to-r from-orange-500/10 to-red-500/10 rounded-lg border border-orange-500/30">
+                            <p className="text-xs text-orange-400">
+                              <span className="font-bold">AI Rejected:</span> {application.attempt_meta.rejected_at ? formatDate(application.attempt_meta.rejected_at) : 'Recently'}
+                              <br />
+                              <span className="text-gray-400 italic">{application.attempt_meta.rejection_reason || 'Not a good match'}</span>
                             </p>
                           </div>
                         )}
@@ -410,6 +753,17 @@ export default function Applications() {
                     </div>
 
                     <div className="ml-6 flex flex-col items-end space-y-3">
+                      {/* Show View Materials button for applications with materials_ready status */}
+                      {application.status === 'materials_ready' && (
+                        <button
+                          onClick={() => openMaterialsModal(application)}
+                          className="text-purple-400 hover:text-purple-300 text-sm font-bold flex items-center px-4 py-2 rounded-lg border border-purple-500/30 hover:bg-purple-500/10 transition-all duration-300"
+                        >
+                          <FileText className="h-4 w-4 mr-2" />
+                          VIEW AI MATERIALS
+                        </button>
+                      )}
+                      
                       <button
                         onClick={() => openDetails(application.id)}
                         className="text-cyan-400 hover:text-cyan-300 text-sm font-bold flex items-center px-4 py-2 rounded-lg border border-cyan-500/30 hover:bg-cyan-500/10 transition-all duration-300"
@@ -418,16 +772,17 @@ export default function Applications() {
                         VIEW DETAILS
                       </button>
                       
-                      <button
-                        onClick={() => {
-                          // This would show job details
-                          toast.success('Job details would open here')
-                        }}
-                        className="text-green-400 hover:text-green-300 text-sm font-bold flex items-center px-4 py-2 rounded-lg border border-green-500/30 hover:bg-green-500/10 transition-all duration-300"
-                      >
-                        <ExternalLink className="h-4 w-4 mr-2" />
-                        VIEW JOB
-                      </button>
+                      {application.jobs?.raw?.url && (
+                        <a
+                          href={application.jobs.raw.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-green-400 hover:text-green-300 text-sm font-bold flex items-center px-4 py-2 rounded-lg border border-green-500/30 hover:bg-green-500/10 transition-all duration-300"
+                        >
+                          <ExternalLink className="h-4 w-4 mr-2" />
+                          VIEW JOB
+                        </a>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -518,6 +873,19 @@ export default function Applications() {
           </div>
         </div>
       </div>
+    )}
+
+    {/* Application Materials Modal */}
+    {selectedApplication && (
+      <ApplicationMaterialsModal
+        isOpen={materialsModalOpen}
+        onClose={() => {
+          setMaterialsModalOpen(false)
+          setSelectedApplication(null)
+        }}
+        application={selectedApplication}
+        onMarkAsManuallySubmitted={handleMarkAsManuallySubmitted}
+      />
     )}
     </>
   )

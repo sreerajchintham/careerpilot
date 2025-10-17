@@ -131,7 +131,9 @@ export default function ResumeDiffModal({
           applied_text: s.appliedText  // Match backend snake_case format
         }))
 
-      const response = await fetch('http://127.0.0.1:8001/save-resume-draft', {
+      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      
+      const response = await fetch(`${API_BASE_URL}/save-resume-draft`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

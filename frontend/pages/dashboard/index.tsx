@@ -10,9 +10,15 @@ import {
   TrendingUp, 
   Clock,
   CheckCircle,
-  AlertCircle
+  AlertCircle,
+  User,
+  Mail,
+  MapPin,
+  Briefcase,
+  Phone
 } from 'lucide-react'
 import { supabase, Application, Job } from '../../lib/supabase'
+import { apiClient } from '../../lib/api'
 
 export default function Dashboard() {
   const { user, appUser, loading } = useAuth()
@@ -24,6 +30,9 @@ export default function Dashboard() {
     recentApplications: 0,
   })
   const [recentApplications, setRecentApplications] = useState<Application[]>([])
+  const [profile, setProfile] = useState<any>(null)
+  const [resume, setResume] = useState<any>(null)
+  const [loadingProfile, setLoadingProfile] = useState(true)
 
   useEffect(() => {
     if (!loading && !user) {
@@ -34,6 +43,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (user) {
       fetchDashboardData()
+      fetchProfileAndResume()
     }
   }, [user])
 
@@ -91,6 +101,26 @@ export default function Dashboard() {
       setRecentApplications(recentApps || [])
     } catch (error) {
       console.error('Error fetching dashboard data:', error)
+    }
+  }
+
+  const fetchProfileAndResume = async () => {
+    if (!user) return
+    
+    try {
+      setLoadingProfile(true)
+      
+      // Fetch user profile
+      const profileData = await apiClient.getUserProfile(user.id)
+      setProfile(profileData.user?.profile)
+      
+      // Fetch latest resume
+      const resumeData = await apiClient.getLatestResume(user.id)
+      setResume(resumeData.resume)
+    } catch (error) {
+      console.error('Error fetching profile and resume:', error)
+    } finally {
+      setLoadingProfile(false)
     }
   }
 
@@ -162,12 +192,136 @@ export default function Dashboard() {
         {/* Header */}
         <div>
           <h1 className="text-4xl font-bold bg-gradient-to-r from-cyan-400 to-green-400 bg-clip-text text-transparent">
-            WELCOME BACK, {appUser?.profile?.name || user.email?.split('@')[0].toUpperCase()}!
+            WELCOME BACK, {profile?.name || user.email?.split('@')[0].toUpperCase()}!
           </h1>
           <p className="mt-2 text-lg text-gray-300">
             Here's what's happening with your job search today.
           </p>
         </div>
+
+        {/* Profile & Resume Preview */}
+        {!loadingProfile && (profile || resume) && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Profile Card */}
+            {profile && (
+              <div className="card-futuristic rounded-2xl p-6">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-gray-200">YOUR PROFILE</h2>
+                  <a 
+                    href="/dashboard/resume"
+                    className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
+                  >
+                    Edit →
+                  </a>
+                </div>
+                <div className="space-y-4">
+                  {profile.name && (
+                    <div className="flex items-center space-x-3">
+                      <User className="h-5 w-5 text-cyan-400" />
+                      <span className="text-gray-300">{profile.name}</span>
+                    </div>
+                  )}
+                  {profile.email && (
+                    <div className="flex items-center space-x-3">
+                      <Mail className="h-5 w-5 text-cyan-400" />
+                      <span className="text-gray-300">{profile.email}</span>
+                    </div>
+                  )}
+                  {profile.phone && (
+                    <div className="flex items-center space-x-3">
+                      <Phone className="h-5 w-5 text-cyan-400" />
+                      <span className="text-gray-300">{profile.phone}</span>
+                    </div>
+                  )}
+                  {profile.current_title && (
+                    <div className="flex items-center space-x-3">
+                      <Briefcase className="h-5 w-5 text-cyan-400" />
+                      <span className="text-gray-300">{profile.current_title}</span>
+                    </div>
+                  )}
+                  {profile.location && (
+                    <div className="flex items-center space-x-3">
+                      <MapPin className="h-5 w-5 text-cyan-400" />
+                      <span className="text-gray-300">{profile.location}</span>
+                    </div>
+                  )}
+                  {profile.skills && profile.skills.length > 0 && (
+                    <div className="mt-4">
+                      <p className="text-sm text-gray-400 mb-2">TOP SKILLS</p>
+                      <div className="flex flex-wrap gap-2">
+                        {profile.skills.slice(0, 6).map((skill: string, idx: number) => (
+                          <span
+                            key={idx}
+                            className="px-3 py-1 bg-cyan-900/30 text-cyan-300 rounded-full text-sm border border-cyan-500/30"
+                          >
+                            {skill}
+                          </span>
+                        ))}
+                        {profile.skills.length > 6 && (
+                          <span className="px-3 py-1 text-gray-400 text-sm">
+                            +{profile.skills.length - 6} more
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Resume Preview Card */}
+            {resume && (
+              <div className="card-futuristic rounded-2xl p-6">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-gray-200">RESUME PREVIEW</h2>
+                  <a 
+                    href="/dashboard/resume"
+                    className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
+                  >
+                    View Full →
+                  </a>
+                </div>
+                <div className="space-y-4">
+                  <div className="text-sm text-gray-400">
+                    Last updated: {new Date(resume.created_at).toLocaleDateString()}
+                  </div>
+                  {resume.parsed?.summary && (
+                    <div className="mt-4">
+                      <p className="text-sm text-gray-400 mb-2">SUMMARY</p>
+                      <p className="text-gray-300 leading-relaxed line-clamp-4">
+                        {resume.parsed.summary}
+                      </p>
+                    </div>
+                  )}
+                  {resume.text && (
+                    <div className="mt-4 p-4 bg-gray-900/50 rounded-lg max-h-48 overflow-y-auto">
+                      <pre className="text-xs text-gray-400 whitespace-pre-wrap font-mono leading-relaxed">
+                        {resume.text.slice(0, 500)}...
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Empty State for Profile */}
+        {!loadingProfile && !profile && !resume && (
+          <div className="card-futuristic rounded-2xl p-8 text-center">
+            <Upload className="h-16 w-16 text-gray-600 mx-auto mb-4" />
+            <h3 className="text-xl font-bold text-gray-300 mb-2">NO PROFILE YET</h3>
+            <p className="text-gray-400 mb-6">
+              Upload your resume to create your profile and start applying to jobs
+            </p>
+            <a
+              href="/dashboard/resume"
+              className="inline-flex items-center px-6 py-3 bg-gradient-to-r from-cyan-500 to-green-500 text-white font-bold rounded-lg hover:from-cyan-600 hover:to-green-600 transition-all glow-blue"
+            >
+              Upload Resume
+            </a>
+          </div>
+        )}
 
         {/* Stats */}
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">

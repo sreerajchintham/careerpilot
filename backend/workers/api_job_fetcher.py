@@ -67,22 +67,44 @@ class JobFetcher:
             logger.warning("⚠️  Supabase not available")
     
     def save_jobs_to_database(self, jobs: List[Dict[str, Any]]) -> int:
-        """Save jobs to Supabase."""
+        """
+        Save jobs to Supabase with URL validation.
+        
+        Only saves jobs that have valid application URLs.
+        Logs rejected jobs for monitoring.
+        """
         if not self.supabase:
             logger.warning("Supabase not configured")
             return 0
         
         saved = 0
+        rejected_no_url = 0
+        rejected_invalid_url = 0
+        
         for job in jobs:
             try:
+                # CRITICAL: Validate job URL exists and is valid
+                job_url = job.get('url', '').strip()
+                
+                if not job_url:
+                    rejected_no_url += 1
+                    logger.warning(f"❌ Rejected (no URL): {job.get('title', 'Unknown')} at {job.get('company', 'Unknown')}")
+                    continue
+                
+                # Validate URL format
+                if not self._is_valid_url(job_url):
+                    rejected_invalid_url += 1
+                    logger.warning(f"❌ Rejected (invalid URL): {job.get('title', 'Unknown')} - {job_url}")
+                    continue
+                
                 # Check if exists
-                existing = self.supabase.table('jobs').select('id').eq('raw->>url', job.get('url')).execute()
+                existing = self.supabase.table('jobs').select('id').eq('raw->>url', job_url).execute()
                 
                 if existing.data:
                     logger.debug(f"Job exists: {job.get('title')}")
                     continue
                 
-                # Insert job
+                # Insert job (only if it has a valid URL)
                 job_data = {
                     'id': str(uuid.uuid4()),
                     'source': job.get('source', 'unknown'),
@@ -91,7 +113,7 @@ class JobFetcher:
                     'location': job.get('location'),
                     'posted_at': job.get('posted_at'),
                     'raw': {
-                        'url': job.get('url'),
+                        'url': job_url,  # Guaranteed to be valid here
                         'description': job.get('description', '')[:1000],  # Limit length
                         'requirements': job.get('requirements', []),
                         'salary': job.get('salary'),
@@ -106,12 +128,47 @@ class JobFetcher:
                 
                 if response.data:
                     saved += 1
-                    logger.info(f"✅ Saved: {job.get('title')} at {job.get('company')}")
+                    logger.info(f"✅ Saved: {job.get('title')} at {job.get('company')} | URL: {job_url[:50]}...")
             
             except Exception as e:
                 logger.error(f"Error saving job: {e}")
         
+        # Summary log
+        logger.info(f"\n📊 Job Save Summary:")
+        logger.info(f"   ✅ Saved: {saved}")
+        logger.info(f"   ❌ Rejected (no URL): {rejected_no_url}")
+        logger.info(f"   ❌ Rejected (invalid URL): {rejected_invalid_url}")
+        logger.info(f"   📝 Total processed: {saved + rejected_no_url + rejected_invalid_url}")
+        
         return saved
+    
+    def _is_valid_url(self, url: str) -> bool:
+        """
+        Validate if URL is properly formatted and accessible.
+        
+        Returns True if URL:
+        - Starts with http:// or https://
+        - Contains a domain
+        - Is not obviously malformed
+        """
+        if not url or not isinstance(url, str):
+            return False
+        
+        url = url.strip().lower()
+        
+        # Must start with http:// or https://
+        if not (url.startswith('http://') or url.startswith('https://')):
+            return False
+        
+        # Must have a domain (at least one dot after protocol)
+        if '.' not in url.split('://', 1)[1]:
+            return False
+        
+        # Reject obviously bad URLs
+        if any(bad in url for bad in ['localhost', '127.0.0.1', 'example.com', 'test.com']):
+            return False
+        
+        return True
 
 
 class AdzunaFetcher(JobFetcher):

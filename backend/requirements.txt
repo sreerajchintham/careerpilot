@@ -20,5 +20,7 @@ beautifulsoup4==4.12.3
 lxml==5.1.0
 # Rate limiting and retries
 tenacity==8.2.3
+# Process management for worker
+psutil==5.9.6
 
 

@@ -12,7 +12,9 @@ import {
   Menu,
   X,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Settings,
+  BarChart3
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -26,6 +28,8 @@ const navigation = [
   { name: 'Job Scraping', href: '/dashboard/jobs', icon: Search },
   { name: 'Applications', href: '/dashboard/applications', icon: Send },
   { name: 'Resume Drafting', href: '/dashboard/drafts', icon: FileText },
+  { name: 'Analytics', href: '/dashboard/analytics', icon: BarChart3 },
+  { name: 'Profile & Settings', href: '/dashboard/profile', icon: Settings },
 ]
 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
